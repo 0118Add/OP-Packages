@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# Copyright (c) 2019 vernesong
+# Copyright (c) 2019-2024 vernesong
 
 START=99
 STOP=15
@@ -17,7 +17,6 @@ FW4=$(command -v fw4)
 DNSMASQ_CONF_DIR=$(uci -q get dhcp.@dnsmasq[0].confdir || echo '/tmp/dnsmasq.d')
 DNSMASQ_CONF_DIR=${DNSMASQ_CONF_DIR%*/}
 }
-LOGTIME=$(echo $(date "+%Y-%m-%d %H:%M:%S"))
 CLASH="/etc/openclash/clash"
 CLASH_CONFIG="/etc/openclash"
 CRON_FILE="/etc/crontabs/root"
@@ -308,7 +307,7 @@ ruby -ryaml -rYAML -I "/usr/share/openclash" -E UTF-8 -e "
 begin
    YAML.load_file('$RAW_CONFIG_FILE');
 rescue Exception => e
-   puts '${LOGTIME} Error: Unable To Parse Config File,【' + e.message + '】';
+   YAML.LOG('Error: Unable To Parse Config File,【' + e.message + '】');
    system 'rm -rf ${TMP_CONFIG_FILE}';
 end
 " 2>/dev/null >> $LOG_FILE
@@ -589,7 +588,6 @@ config_test()
 {
    if [ -f "$CLASH" ]; then
       LOG_OUT "Test The Config File First..."
-      chmod o+w "$CONFIG_FILE" 2>/dev/null
       test_info=$(nohup $CLASH -t -d $CLASH_CONFIG -f "$CONFIG_FILE")
       local IFS=$'\n'
       for i in $test_info; do
@@ -601,10 +599,9 @@ config_test()
          fi
       done
       if [ -n "$(echo "$test_info" |grep "test failed")" ]; then
-         return 1
+         LOG_OUT "Error: Config File Tested Faild, Please Check The Log Infos!"
+         start_fail
       fi
-   else
-      return 0
    fi
 }
 
@@ -612,43 +609,18 @@ start_run_core()
 {
    ulimit -SHn 65535 2>/dev/null
    ulimit -v unlimited 2>/dev/null
+   ulimit -u unlimited 2>/dev/null
    modprobe tun >/dev/null 2>&1
    if ! $quick_start; then
       mv "$TMP_CONFIG_FILE" "$CONFIG_FILE" 2>/dev/null
       rm -rf "$TMP_CONFIG_FILE" 2>/dev/null
+      config_test
    fi
-   config_test
-   if [ $? -ne 0 ]; then
-      LOG_OUT "Error: Config File Tested Faild, Please Check The Log Infos!"
-      start_fail
-   fi
-
+   chown root:root /etc/openclash/core/* 2>/dev/null
    kill_clash
-   #防止赋权失败
-   touch "/tmp/openclash.log" 2>/dev/null
-   chmod o+w /etc/openclash/proxy_provider/* 2>/dev/null
-   chmod o+w /etc/openclash/rule_provider/* 2>/dev/null
-   chmod o+w /etc/openclash/history/* 2>/dev/null
-   chmod o+w /etc/openclash/cache.db 2>/dev/null
-   chmod o+w /tmp/openclash.log 2>/dev/null
-   chown nobody:nogroup /etc/openclash/core/* 2>/dev/null
    #使用nobody启动内核方便代理路由自身流量
    capabilties="cap_sys_resource,cap_dac_override,cap_net_raw,cap_net_bind_service,cap_net_admin,cap_sys_ptrace,cap_sys_admin"
    capsh --caps="${capabilties}+eip" -- -c "capsh --user=nobody --addamb='${capabilties}' -- -c 'nohup $CLASH -d $CLASH_CONFIG -f \"$CONFIG_FILE\" >> $LOG_FILE 2>&1 &'" >> $LOG_FILE 2>&1
-
-}
-
-check_core_status()
-{
-   check_time=1
-   while ( [ "$check_time" -le 3 ] && [ -n "$(pidof clash)" ] )
-   do
-      sleep 1
-      let check_time++
-   done
-   if [ -z "$(pidof clash)" ]; then
-      LOG_ALERT
-   fi
 }
 
 #防火墙设置部分
@@ -728,6 +700,52 @@ upnp_exclude()
             fi
          fi
       done >/dev/null 2>&1
+   fi
+}
+
+check_core_status()
+{
+   TUN_WAIT=0
+   TUN_RESTART=1
+   if [ -n "$en_mode_tun" ] || [ "$ipv6_mode" -eq 2 ]; then
+      if [ -n "$en_mode_tun" ]; then
+         ip_="ip"
+      else
+         ip_="ip -6"
+      fi
+
+      #wait 120s most for tun interface start
+      while ( [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_WAIT" -le 120 ] )
+      do
+         $ip_ link set utun up
+         let TUN_WAIT++
+         sleep 1
+      done >/dev/null 2>&1
+
+      if [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_WAIT" -gt 120 ]; then
+         while ( [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_RESTART" -le 3 ] )
+         do
+            LOG_OUT "Warning: TUN Interface Start Failed, Try to Restart Again..."
+            kill_clash
+            start_run_core
+            sleep 120
+            let TUN_RESTART++
+         done >/dev/null 2>&1
+         if [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_RESTART" -gt 3 ]; then
+            LOG_OUT "Warning: TUN Interface Start Failed, Please Check The Dependence or Try to Restart Again!"
+            start_fail
+         fi
+      fi
+
+      if [ "$ipv6_mode" -eq 2 ]; then
+         ip -6 rule del oif utun table 2022 >/dev/null 2>&1
+         ip -6 route del default dev utun table 2022 >/dev/null 2>&1
+         ip -6 route replace default dev utun table "$PROXY_ROUTE_TABLE"
+         ip -6 rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE"
+      fi
+
+      ip route replace default dev utun table "$PROXY_ROUTE_TABLE"
+      ip rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE"
    fi
 }
 
@@ -1037,67 +1055,6 @@ firewall_redirect_exclude()
    fi
 }
 
-set_tun_tap()
-{
-      #启动TUN
-      if [ -z "$1" ]; then
-         ip_="ip"
-      else
-         ip_="ip -6"
-      fi
-
-      TUN_WAIT=0
-      TUN_RESTART=1
-
-      if [ -n "$(pidof clash)" ] && [ -n "$1" ] && [ "$(ip -6 route list |grep utun |wc -l)" -ne 2 ] && [ -n "$(ifconfig utun)" ]; then
-         ip -6 addr add fdfe:dcba:9876::1/126 dev utun >/dev/null 2>&1
-         ip -6 route add fdfe:dcba:9876::/126 dev utun proto kernel metric 256 pref medium >/dev/null 2>&1
-         ip -6 route add fe80::/64 dev utun proto kernel metric 256 pref medium >/dev/null 2>&1
-         ip -6 route replace default dev utun table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-         ip -6 rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-      fi
-
-      #prevent lost when v6 utun address added
-      if [ -n "$(pidof clash)" ] && [ -z "$(ip route list |grep utun)" ] && [ -n "$(ifconfig utun)" ]; then
-         route add -net "$fakeip_range" dev utun >/dev/null 2>&1
-         ip route replace default dev utun table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-         ip rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-      fi
-
-      $ip_ link set utun up
-
-      LOG_OUT "Tip: Waiting for TUN Interface Start..."
-      while ( [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_WAIT" -le 30 ] )
-      do
-         $ip_ link set utun up
-         let TUN_WAIT++
-         sleep 2
-      done
-
-      if [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_WAIT" -gt 10 ]; then
-         while ( [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_RESTART" -le 3 ] )
-         do
-            LOG_OUT "Warning: TUN Interface Start Failed, Try to Restart Again..."
-            kill_clash
-            start_run_core
-            sleep 5
-            check_core_status
-            let TUN_RESTART++
-         done
-         if [ -n "$(pidof clash)" ] && [ -z "$($ip_ route list |grep utun)" ] && [ "$TUN_RESTART" -gt 3 ]; then
-            LOG_OUT "Warning: TUN Interface Start Failed, Please Check The Dependence or Try to Restart Again!"
-            start_fail
-         fi
-      fi
-
-      if [ -n "$1" ]; then
-         ip -6 rule del oif utun table 2022 >/dev/null 2>&1
-         ip -6 route del default dev utun table 2022 >/dev/null 2>&1
-      fi
-      $ip_ route replace default dev utun table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-      $ip_ rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-}
-
 set_firewall()
 {
 
@@ -1309,13 +1266,23 @@ if [ -n "$FW4" ]; then
                   ACBLACKDNSFILTER="$ACBLACKDNSFILTER ether saddr != @lan_ac_black_macs"
                fi
             fi
-            nft insert rule inet fw4 dstnat position 0 tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
+            if [ -z "$en_mode_tun" ]; then
+               nft insert rule inet fw4 dstnat position 0 tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
+            else
+               nft insert rule inet fw4 dstnat position 0 tcp dport 53 ${ACBLACKDNSFILTER} counter accept comment \"OpenClash DNS Hijack\"
+            fi
             nft insert rule inet fw4 dstnat position 0 udp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
          else
             nft insert rule inet fw4 dstnat position 0 tcp dport 53 ip saddr @lan_ac_white_ips counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
             nft insert rule inet fw4 dstnat position 0 udp dport 53 ip saddr @lan_ac_white_ips counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
             nft insert rule inet fw4 dstnat position 0 tcp dport 53 ether saddr @lan_ac_white_macs counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
             nft insert rule inet fw4 dstnat position 0 udp dport 53 ether saddr @lan_ac_white_macs counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
+         fi
+      fi
+      if [ "$router_self_proxy" = 1 ]; then
+         nft 'add chain inet fw4 nat_output { type nat hook output priority -1; }'
+         if [ -n "$en_mode_tun" ]; then
+            nft insert rule inet fw4 nat_output position 0 skuid != 65534 meta nfproto {ipv4} tcp dport 53 counter accept comment \"OpenClash DNS Hijack\"
          fi
       fi
    elif [ "$enable_redirect_dns" -eq 2 ]; then
@@ -1330,7 +1297,11 @@ if [ -n "$FW4" ]; then
                ACBLACKDNSFILTER="$ACBLACKDNSFILTER ether saddr != @lan_ac_black_macs"
             fi
          fi
-         nft add rule inet fw4 openclash_dns_redirect tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+         if [ -z "$en_mode_tun" ]; then
+            nft add rule inet fw4 openclash_dns_redirect tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+         else
+            nft add rule inet fw4 openclash_dns_redirect tcp dport 53 ${ACBLACKDNSFILTER} counter accept comment \"OpenClash DNS Hijack\"
+         fi
          nft add rule inet fw4 openclash_dns_redirect udp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
       else
          nft add rule inet fw4 openclash_dns_redirect tcp dport 53 ip saddr @lan_ac_white_ips counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
@@ -1342,7 +1313,11 @@ if [ -n "$FW4" ]; then
       nft 'insert rule inet fw4 dstnat position 0 udp dport 53 counter jump openclash_dns_redirect'
       if [ "$router_self_proxy" = 1 ]; then
          nft 'add chain inet fw4 nat_output { type nat hook output priority -1; }'
-         nft insert rule inet fw4 nat_output position 0 tcp dport 53 ip daddr {127.0.0.1} meta skuid != 65534 counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+         if [ -n "$en_mode_tun" ]; then
+            nft insert rule inet fw4 nat_output position 0 skuid != 65534 meta nfproto {ipv4} tcp dport 53 counter accept comment \"OpenClash DNS Hijack\"
+         else
+            nft insert rule inet fw4 nat_output position 0 tcp dport 53 ip daddr {127.0.0.1} meta skuid != 65534 counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+         fi
          nft insert rule inet fw4 nat_output position 0 udp dport 53 ip daddr {127.0.0.1} meta skuid != 65534 counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
       fi
    fi
@@ -1382,8 +1357,6 @@ if [ -n "$FW4" ]; then
       nft add rule inet fw4 openclash ip protocol tcp counter redirect to "$proxy_port"
       nft 'add rule inet fw4 dstnat meta nfproto {ipv4} ip protocol tcp counter jump openclash'
       if [ -z "$en_mode_tun" ]; then
-         #Google dns
-         nft insert rule inet fw4 dstnat position 0 ip daddr { 8.8.8.8, 8.8.4.4 } tcp dport 53 counter redirect to "$proxy_port" comment \"OpenClash Google DNS Hijack\"
          #udp
          if [ "$enable_udp_proxy" -eq 1 ]; then
             modprobe nft_tproxy >/dev/null 2>&1
@@ -1489,13 +1462,13 @@ if [ -n "$FW4" ]; then
 
    if [ -n "$en_mode_tun" ]; then
       #TUN模式
-      #启动TUN
-      set_tun_tap
-
       #设置防火墙
       if [ "$router_self_proxy" = "1" ] || ([ "$enable_redirect_dns" != "2" ] && [ "$en_mode" = "fake-ip" ]); then
          nft 'add chain inet fw4 openclash_mangle_output'
          nft 'flush chain inet fw4 openclash_mangle_output'
+         if [ "$enable_redirect_dns" != "0" ]; then
+            nft add rule inet fw4 openclash_mangle_output tcp dport 53 skuid != 65534 meta mark set "$PROXY_FWMARK" counter
+         fi
          nft 'add rule inet fw4 openclash_mangle_output ip daddr @localnetwork counter return'
          nft 'add rule inet fw4 openclash_mangle_output ip saddr @localnetwork meta l4proto {tcp,udp} th sport @lan_ac_black_ports counter return'
          if [ "$en_mode" = "fake-ip" ]; then
@@ -1589,17 +1562,6 @@ if [ -n "$FW4" ]; then
          nft 'insert rule inet fw4 mangle_prerouting position 0 meta nfproto {ipv4} ip protocol udp counter jump openclash_mangle'
       fi
 
-      if [ "$enable_redirect_dns" -eq 2 ]; then
-         local position=$(nft -a list chain inet fw4 openclash_dns_redirect |grep "DNS" |grep -v "redirect" |awk -F '# handle ' '{print$2}' |sort -rn |head -1)
-         [ -z "$position" ] && position=0
-         nft insert rule inet fw4 openclash_dns_redirect position "$position" meta nfproto {ipv4} tcp dport 53 counter accept comment \"OpenClash TCP DNS Hijack\"
-      elif [ "$enable_redirect_dns" -eq 1 ]; then
-         nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv4} tcp dport 53 counter accept comment \"OpenClash TCP DNS Hijack\"
-      fi
-      if [ "$router_self_proxy" = 1 ]; then
-         nft insert rule inet fw4 nat_output position 0 skuid != 65534 meta nfproto {ipv4} tcp dport 53 counter accept comment \"OpenClash TCP DNS Hijack\"
-      fi
-
       #TUN FORWORD
       nft insert rule inet fw4 forward position 0 meta l4proto {tcp,udp} oifname utun counter accept comment \"OpenClash TUN Forward\"
       nft insert rule inet fw4 forward position 0 meta l4proto {tcp,udp} iifname utun counter accept comment \"OpenClash TUN Forward\"
@@ -1630,13 +1592,23 @@ if [ -n "$FW4" ]; then
                      ACBLACKDNSFILTER="$ACBLACKDNSFILTER ether saddr != @lan_ac_black_macs"
                   fi
                fi
-               nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} tcp dport 53 ${ACBLACKDNSFILTER} counter accept comment \"OpenClash DNS Hijack\"
+               else
+                  nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
+               fi
                nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} udp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
             else
                nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} tcp dport 53 ip6 saddr @lan_ac_white_ipv6s counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
                nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} udp dport 53 ip6 saddr @lan_ac_white_ipv6s counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
                nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} tcp dport 53 ether saddr @lan_ac_white_macs counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
                nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} udp dport 53 ether saddr @lan_ac_white_macs counter redirect to "$DNSPORT" comment \"OpenClash DNS Hijack\"
+            fi
+            if [ "$router_self_proxy" = 1 ]; then
+               nft 'add chain inet fw4 nat_output { type nat hook output priority -1; }'
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  nft insert rule inet fw4 nat_output position 0 skuid != 65534 meta nfproto {ipv6} tcp dport 53 counter accept comment \"OpenClash DNS Hijack\"
+               fi
             fi
          elif [ "$enable_redirect_dns" -eq 2 ]; then
             if [ "$lan_ac_mode" != "1" ]; then
@@ -1649,7 +1621,11 @@ if [ -n "$FW4" ]; then
                      ACBLACKDNSFILTER="$ACBLACKDNSFILTER ether saddr != @lan_ac_black_macs"
                   fi
                fi
-               nft add rule inet fw4 openclash_dns_redirect meta nfproto {ipv6} tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  nft add rule inet fw4 openclash_dns_redirect meta nfproto {ipv6} tcp dport 53 ${ACBLACKDNSFILTER} counter accept comment \"OpenClash DNS Hijack\"
+               else
+                  nft add rule inet fw4 openclash_dns_redirect meta nfproto {ipv6} tcp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+               fi
                nft add rule inet fw4 openclash_dns_redirect meta nfproto {ipv6} udp dport 53 ${ACBLACKDNSFILTER} counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
             else
                nft add rule inet fw4 openclash_dns_redirect meta nfproto {ipv6} tcp dport 53 ip6 saddr @lan_ac_white_ipv6s counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
@@ -1661,21 +1637,14 @@ if [ -n "$FW4" ]; then
             nft 'insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} udp dport 53 counter jump openclash_dns_redirect'
             if [ "$router_self_proxy" = 1 ]; then
                nft 'add chain inet fw4 nat_output { type nat hook output priority -1; }'
-               nft insert rule inet fw4 nat_output position 0 meta nfproto {ipv6} tcp dport 53 ip6 daddr {::/0} meta skuid != 65534 counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  nft insert rule inet fw4 nat_output position 0 skuid != 65534 meta nfproto {ipv6} tcp dport 53 counter accept comment \"OpenClash DNS Hijack\"
+               else
+                  nft insert rule inet fw4 nat_output position 0 meta nfproto {ipv6} tcp dport 53 ip6 daddr {::/0} meta skuid != 65534 counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
+               fi
                nft insert rule inet fw4 nat_output position 0 meta nfproto {ipv6} udp dport 53 ip6 daddr {::/0} meta skuid != 65534 counter redirect to "$dns_port" comment \"OpenClash DNS Hijack\"
             fi
          fi
-      fi
-
-      if [ "$enable_redirect_dns" -eq 2 ]; then
-         local position=$(nft -a list chain inet fw4 openclash_dns_redirect |grep "DNS" |grep -v "redirect" |awk -F '# handle ' '{print$2}' |sort -rn |head -1)
-         [ -z "$position" ] && position=0
-         nft insert rule inet fw4 openclash_dns_redirect position "$position" meta nfproto {ipv6} tcp dport 53 counter accept comment \"OpenClash TCP DNS Hijack\"
-      elif [ "$enable_redirect_dns" -eq 1 ]; then
-         nft insert rule inet fw4 dstnat position 0 meta nfproto {ipv6} tcp dport 53 counter accept comment \"OpenClash TCP DNS Hijack\"
-      fi
-      if [ "$router_self_proxy" = 1 ]; then
-         nft insert rule inet fw4 nat_output position 0 skuid != 65534 meta nfproto {ipv6} tcp dport 53 counter accept comment \"OpenClash TCP DNS Hijack\"
       fi
 
       if [ "$china_ip6_route" != "0" ] || [ "$disable_udp_quic" = "1" ]; then
@@ -1740,9 +1709,6 @@ if [ -n "$FW4" ]; then
             nft add element inet fw4 localnetwork6 { "$wan_ip6" }
          done
       fi
-
-      #Google dns
-      nft insert rule inet fw4 dstnat position 0 ip6 daddr { 2001:4860:4860::8888, 2001:4860:4860::8844 } tcp dport 53 counter accept comment \"OpenClash Google DNS Hijack\"
 
       if [ "$ipv6_mode" -eq 1 ]; then
          #tcp
@@ -1850,6 +1816,7 @@ if [ -n "$FW4" ]; then
             if [ "$ipv6_mode" -eq 2 ]; then
                nft 'add chain inet fw4 openclash_mangle_output_v6'
                nft 'flush chain inet fw4 openclash_mangle_output_v6'
+               nft add rule inet fw4 openclash_mangle_output_v6 meta nfproto {ipv6} skuid != 65534 tcp dport 53 mark set "$PROXY_FWMARK" counter
                nft 'add rule inet fw4 openclash_mangle_output_v6 ip6 daddr @localnetwork6 counter return'
                nft 'add rule inet fw4 openclash_mangle_output_v6 ip6 saddr @localnetwork6 meta nfproto {ipv6} sport @lan_ac_black_ports counter return'
                nft 'add rule inet fw4 openclash_mangle_output_v6 skuid != 65534 ip6 daddr @wan_ac_black_ipv6s counter return'
@@ -1890,8 +1857,6 @@ if [ -n "$FW4" ]; then
             ip -6 rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE"
             ip -6 route add local ::/0 dev lo table "$PROXY_ROUTE_TABLE"
          fi
-      else
-         set_tun_tap "v6"
       fi
 
       #TUN FORWORD
@@ -2095,12 +2060,21 @@ if [ -z "$FW4" ]; then
                fi
             fi
             iptables -t nat -I PREROUTING -p udp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
-            iptables -t nat -I PREROUTING -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
+            if [ -z "$en_mode_tun" ]; then
+               iptables -t nat -I PREROUTING -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
+            else
+               iptables -t nat -I PREROUTING -p tcp --dport 53 ${ACBLACKDNSFILTER} -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
+            fi
          else
             iptables -t nat -I PREROUTING -p udp --dport 53 -m set --match-set lan_ac_white_ips src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
             iptables -t nat -I PREROUTING -p tcp --dport 53 -m set --match-set lan_ac_white_ips src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
             iptables -t nat -I PREROUTING -p udp --dport 53 -m set --match-set lan_ac_white_macs src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
             iptables -t nat -I PREROUTING -p tcp --dport 53 -m set --match-set lan_ac_white_macs src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
+         fi
+      fi
+      if [ "$router_self_proxy" = 1 ]; then
+         if [ -n "$en_mode_tun" ]; then
+            iptables -t nat -I OUTPUT -m owner ! --uid-owner 65534 -m comment --comment "OpenClash DNS Hijack" -p tcp --dport 53 -j ACCEPT
          fi
       fi
    elif [ "$enable_redirect_dns" -eq 2 ]; then
@@ -2117,7 +2091,11 @@ if [ -z "$FW4" ]; then
             fi
          fi
          iptables -t nat -A openclash_dns_redirect -p udp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
-         iptables -t nat -A openclash_dns_redirect -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+         if [ -z "$en_mode_tun" ]; then
+            iptables -t nat -A openclash_dns_redirect -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+         else
+            iptables -t nat -A openclash_dns_redirect -p tcp --dport 53 ${ACBLACKDNSFILTER} -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
+         fi
       else
          iptables -t nat -A openclash_dns_redirect -p udp --dport 53 -m set --match-set lan_ac_white_ips src -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
          iptables -t nat -A openclash_dns_redirect -p tcp --dport 53 -m set --match-set lan_ac_white_ips src -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
@@ -2128,7 +2106,11 @@ if [ -z "$FW4" ]; then
       iptables -t nat -I PREROUTING -p tcp --dport 53 -j openclash_dns_redirect
       if [ "$router_self_proxy" = 1 ]; then
          iptables -t nat -I OUTPUT -p udp --dport 53 -d 127.0.0.1 -m owner ! --uid-owner 65534 -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
-         iptables -t nat -I OUTPUT -p tcp --dport 53 -d 127.0.0.1 -m owner ! --uid-owner 65534 -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+         if [ -n "$en_mode_tun" ]; then
+            iptables -t nat -I OUTPUT -m owner ! --uid-owner 65534 -m comment --comment "OpenClash DNS Hijack" -p tcp --dport 53 -j ACCEPT
+         else
+            iptables -t nat -I OUTPUT -p tcp --dport 53 -d 127.0.0.1 -m owner ! --uid-owner 65534 -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+         fi
       fi
    fi
 
@@ -2166,9 +2148,6 @@ if [ -z "$FW4" ]; then
       iptables -t nat -A PREROUTING -p tcp -j openclash
 
       if [ -z "$en_mode_tun" ]; then
-         #Google dns
-         iptables -t nat -I PREROUTING -m comment --comment "OpenClash Google DNS Hijack" -p tcp -d 8.8.8.8 --dport 53 -j REDIRECT --to-ports "$proxy_port"
-         iptables -t nat -I PREROUTING -m comment --comment "OpenClash Google DNS Hijack" -p tcp -d 8.8.4.4 --dport 53 -j REDIRECT --to-ports "$proxy_port"
          #udp
          if [ "$enable_udp_proxy" -eq 1 ]; then
             modprobe xt_TPROXY >/dev/null 2>&1
@@ -2271,13 +2250,14 @@ if [ -z "$FW4" ]; then
 
    if [ -n "$en_mode_tun" ]; then
       #TUN模式
-      #启动TUN
-      set_tun_tap
       #设置防火墙
       if [ "$router_self_proxy" = "1" ] || ([ "$enable_redirect_dns" != "2" ] && [ "$en_mode" = "fake-ip" ]); then
          if [ "$en_mode" = "fake-ip" ]; then
             iptables -t mangle -N openclash_output
             iptables -t mangle -F openclash_output
+            if [ "$enable_redirect_dns" != "0" ]; then
+               iptables -t mangle -I openclash_output -m owner ! --uid-owner 65534 -p tcp --dport 53 -j MARK --set-mark "$PROXY_FWMARK"
+            fi
             iptables -t mangle -A openclash_output -m set --match-set localnetwork dst -j RETURN
             iptables -t mangle -A openclash_output -m set --match-set localnetwork src -m set --match-set lan_ac_black_ports src -j RETURN >/dev/null 2>&1
             if [ "$en_mode_tun" -eq 1 ]; then
@@ -2376,17 +2356,6 @@ if [ -z "$FW4" ]; then
          iptables -t mangle -I PREROUTING -p udp -j openclash
       fi
 
-      if [ "$enable_redirect_dns" -eq 2 ]; then
-         local position=$(iptables -nvL openclash_dns_redirect -t nat |grep "DNS" |grep -v "REDIRECT" |wc -l)
-         let position++
-         iptables -t nat -I openclash_dns_redirect "$position" -m comment --comment "OpenClash TCP DNS Hijack" -p tcp --dport 53 -j ACCEPT
-      elif [ "$enable_redirect_dns" -eq 1 ]; then
-         iptables -t nat -I PREROUTING -m comment --comment "OpenClash TCP DNS Hijack" -p tcp --dport 53 -j ACCEPT
-      fi
-      if [ "$router_self_proxy" = 1 ]; then
-         iptables -t nat -I OUTPUT -m owner ! --uid-owner 65534 -m comment --comment "OpenClash TCP DNS Hijack" -p tcp --dport 53 -j ACCEPT
-      fi
-
       #TUN FORWORD
       iptables -I FORWARD -m comment --comment "OpenClash TUN Forward" -o utun -j ACCEPT >/dev/null 2>&1
       iptables -I FORWARD -m comment --comment "OpenClash TUN Forward" -i utun -j ACCEPT >/dev/null 2>&1
@@ -2418,12 +2387,21 @@ if [ -z "$FW4" ]; then
                   fi
                fi
                ip6tables -t nat -I PREROUTING -p udp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
-               ip6tables -t nat -I PREROUTING -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  ip6tables -t nat -I PREROUTING -p tcp --dport 53 ${ACBLACKDNSFILTER} -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
+               else
+                  ip6tables -t nat -I PREROUTING -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
+               fi
             else
                ip6tables -t nat -I PREROUTING -p udp --dport 53 -m set --match-set lan_ac_white_ipv6s src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
                ip6tables -t nat -I PREROUTING -p tcp --dport 53 -m set --match-set lan_ac_white_ipv6s src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
                ip6tables -t nat -I PREROUTING -p udp --dport 53 -m set --match-set lan_ac_white_macs src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
                ip6tables -t nat -I PREROUTING -p tcp --dport 53 -m set --match-set lan_ac_white_macs src -j REDIRECT --to-ports "$DNSPORT" -m comment --comment "OpenClash DNS Hijack"
+            fi
+            if [ "$router_self_proxy" = 1 ]; then
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  ip6tables -t nat -I OUTPUT -p tcp --dport 53 -d ::/0 -m owner ! --uid-owner 65534 -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
+               fi
             fi
          elif [ "$enable_redirect_dns" -eq 2 ]; then
             ip6tables -t nat -N openclash_dns_redirect
@@ -2439,7 +2417,11 @@ if [ -z "$FW4" ]; then
                   fi
                fi
                ip6tables -t nat -A openclash_dns_redirect -p udp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
-               ip6tables -t nat -A openclash_dns_redirect -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  ip6tables -t nat -A openclash_dns_redirect -p tcp --dport 53 ${ACBLACKDNSFILTER} -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
+               else
+                  ip6tables -t nat -A openclash_dns_redirect -p tcp --dport 53 ${ACBLACKDNSFILTER} -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+               fi
             else
                ip6tables -t nat -A openclash_dns_redirect -p udp --dport 53 -m set --match-set lan_ac_white_ipv6s src -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
                ip6tables -t nat -A openclash_dns_redirect -p tcp --dport 53 -m set --match-set lan_ac_white_ipv6s src -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
@@ -2450,24 +2432,15 @@ if [ -z "$FW4" ]; then
             ip6tables -t nat -I PREROUTING -p tcp --dport 53 -j openclash_dns_redirect
             if [ "$router_self_proxy" = 1 ]; then
                ip6tables -t nat -I OUTPUT -p udp --dport 53 -d ::/0 -m owner ! --uid-owner 65534 -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
-               ip6tables -t nat -I OUTPUT -p tcp --dport 53 -d ::/0 -m owner ! --uid-owner 65534 -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+               if [ "$ipv6_mode" -eq 2 ]; then
+                  ip6tables -t nat -I OUTPUT -p tcp --dport 53 -d ::/0 -m owner ! --uid-owner 65534 -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
+               else
+                  ip6tables -t nat -I OUTPUT -p tcp --dport 53 -d ::/0 -m owner ! --uid-owner 65534 -j REDIRECT --to-ports "$dns_port" -m comment --comment "OpenClash DNS Hijack"
+               fi
             fi
          fi
       fi
 
-      if [ "$ipv6_mode" -eq 2 ]; then
-         if [ "$enable_redirect_dns" -eq 2 ]; then
-            local position=$(ip6tables -nvL openclash_dns_redirect -t nat |grep "DNS" |grep -v "REDIRECT" |wc -l)
-            let position++
-            ip6tables -t nat -I openclash_dns_redirect "$position" -m comment --comment "OpenClash TCP DNS Hijack" -p tcp --dport 53 -j ACCEPT
-         elif [ "$enable_redirect_dns" -eq 1 ]; then
-            ip6tables -t nat -I PREROUTING -m comment --comment "OpenClash TCP DNS Hijack" -p tcp --dport 53 -j ACCEPT
-         fi
-         if [ "$router_self_proxy" = 1 ]; then
-            ip6tables -t nat -I OUTPUT -p tcp --dport 53 -d ::/0 -m owner ! --uid-owner 65534 -j ACCEPT -m comment --comment "OpenClash DNS Hijack"
-         fi
-      fi
-      
       if [ "$china_ip6_route" != "0" ] || [ "$disable_udp_quic" = "1" ]; then
          ipset -! flush china_ip6_route
          ipset -! restore </etc/openclash/china_ip6_route.ipset
@@ -2518,10 +2491,6 @@ if [ -z "$FW4" ]; then
             ipset add localnetwork6 "$wan_ip6"
          done
       fi
-
-      #Google dns
-      ip6tables -t nat -I PREROUTING -m comment --comment "OpenClash Google DNS Hijack" -p tcp -d 2001:4860:4860::8888 --dport 53 -j ACCEPT
-      ip6tables -t nat -I PREROUTING -m comment --comment "OpenClash Google DNS Hijack" -p tcp -d 2001:4860:4860::8844 --dport 53 -j ACCEPT
 
       if [ "$ipv6_mode" -eq 1 ]; then
          #tcp
@@ -2625,6 +2594,9 @@ if [ -z "$FW4" ]; then
             if [ "$ipv6_mode" -eq 2 ]; then
                ip6tables -t mangle -N openclash_output
                ip6tables -t mangle -F openclash_output
+               if [ "$enable_redirect_dns" != "0" ]; then
+                  ip6tables -t mangle -A openclash_output -m owner ! --uid-owner 65534 -p tcp --dport 53 -j MARK --set-mark "$PROXY_FWMARK"
+               fi
                ip6tables -t mangle -A openclash_output -m set --match-set localnetwork6 dst -j RETURN
                ip6tables -t mangle -A openclash_output -m set --match-set localnetwork6 src -m set --match-set lan_ac_black_ports src -j RETURN >/dev/null 2>&1
                ip6tables -t mangle -A openclash_output -m owner ! --uid-owner 65534 -m set --match-set wan_ac_black_ipv6s dst -j RETURN >/dev/null 2>&1
@@ -2664,8 +2636,6 @@ if [ -z "$FW4" ]; then
             ip -6 rule add fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE"
             ip -6 route add local ::/0 dev lo table "$PROXY_ROUTE_TABLE"
          fi
-      else
-         set_tun_tap "v6"
       fi
 
       #TUN FORWORD
@@ -2754,13 +2724,7 @@ revert_firewall()
 
    #TUN
    ip route del default dev utun table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-   ip rule del fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-
-   ip -6 addr del fdfe:dcba:9876::1/126 dev utun >/dev/null 2>&1
-   ip -6 route del fdfe:dcba:9876::/126 dev utun proto kernel metric 256 pref medium >/dev/null 2>&1
-   ip -6 route del fe80::/64 dev utun proto kernel metric 256 pref medium >/dev/null 2>&1
    ip -6 route del default dev utun table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
-   ip -6 rule del fwmark "$PROXY_FWMARK" table "$PROXY_ROUTE_TABLE" >/dev/null 2>&1
    
    if [ -n "$FW4" ]; then
       for nft in "input" "forward" "dstnat" "srcnat" "nat_output" "mangle_prerouting" "mangle_output"; do
@@ -2905,6 +2869,7 @@ start()
    [ "$enable" != "1" ] && LOG_OUT "Warning: OpenClash Now Disabled, Need Start From Luci Page, Exit..." && SLOG_CLEAN && del_lock && exit 0
 
    LOG_OUT "OpenClash Start Running..."
+
    config_choose
    do_run_mode
 
@@ -2914,9 +2879,6 @@ start()
    LOG_OUT "Step 2: Check The Components..."
    #检查文件是否存在
    do_run_file "$RAW_CONFIG_FILE" "$BACKUP_FILE"
-
-   #快速启动判断
-   check_run_quick
 
    if ! $quick_start; then
       LOG_OUT "Step 3: Modify The Config File..."
@@ -2929,20 +2891,20 @@ start()
          chmod +x /etc/openclash/custom/openclash_custom_overwrite.sh >/dev/null 2>&1
          /etc/openclash/custom/openclash_custom_overwrite.sh 2>/dev/null "$TMP_CONFIG_FILE"
       fi
+   else
+      LOG_OUT "Step 3: Quick Start Mode, Skip Modify The Config File..."
    fi
 
    LOG_OUT "Step 4: Start Running The Clash Core..."
    start_run_core
 
-   LOG_OUT "Step 5: Check The Core Status..."
-   check_core_status
-
-   LOG_OUT "Step 6: Set Firewall Rules..."
+   LOG_OUT "Step 5: Set Firewall Rules..."
    set_firewall
-   LOG_OUT "Step 7: Restart Dnsmasq..."
+   check_core_status &
+   LOG_OUT "Step 6: Restart Dnsmasq..."
    change_dns "$enable_redirect_dns" "$disable_masq_cache"
 
-   LOG_OUT "Step 8: Add Cron Rules, Start Daemons..."
+   LOG_OUT "Step 7: Add Cron Rules, Start Daemons..."
    add_cron
    if [ -z "$(uci -q get dhcp.lan.dhcpv6)" ] || [ "$(uci -q get dhcp.lan.dhcpv6)" == "disabled" ]; then
       LOG_OUT "OpenClash Start Successful!"
@@ -2980,12 +2942,15 @@ stop()
       kill -9 "$streaming_unlock_pid" >/dev/null 2>&1
    done >/dev/null 2>&1
 
+   openclash_stop_pids=$(unify_ps_pids "/etc/init.d/openclash stop")
    openclash_pids=$(unify_ps_pids "/etc/init.d/openclash")
-   for openclash_pid in $openclash_pids; do
-      if [ "$openclash_pid" != "$$" ]; then
-         kill -9 "$openclash_pid" >/dev/null 2>&1
-      fi
-   done >/dev/null 2>&1
+   if [ -n "$openclash_stop_pids" ]; then
+      for openclash_pid in $openclash_pids; do
+         if [ "$openclash_pid" != "$$" ] && ! "$start_fail_pid"; then
+            kill -9 "$openclash_pid" >/dev/null 2>&1
+         fi
+      done >/dev/null 2>&1
+   fi
 
    LOG_OUT "Step 4: Close The Clash Core Process..."
    if [ "$enable" != "1" ]; then
@@ -3011,6 +2976,8 @@ stop()
       rm -rf ${DNSMASQ_CONF_DIR}/dnsmasq_openclash_chnroute6_pass.conf >/dev/null 2>&1
       rm -rf ${DNSMASQ_CONF_DIR}/dnsmasq_openclash_custom_domain.conf >/dev/null 2>&1
       del_lock
+      LOG_OUT "OpenClash Already Stop!"
+   else
       LOG_OUT "OpenClash Already Stop!"
    fi
 
@@ -3044,6 +3011,8 @@ restart()
    set_lock
    echo "OpenClash Restart..."
    LOG_OUT "OpenClash Restart..."
+   #快速启动判断
+   check_run_quick
    stop
    start
    del_lock
@@ -3060,6 +3029,7 @@ reload()
       do_run_mode 2>/dev/null
       get_config 2>/dev/null
       set_firewall 2>/dev/null
+      check_core_status & 2>/dev/null
       /etc/init.d/dnsmasq restart >/dev/null 2>&1
       SLOG_CLEAN
       del_lock
@@ -3076,6 +3046,7 @@ reload()
       do_run_mode 2>/dev/null
       get_config 2>/dev/null
       set_firewall 2>/dev/null
+      check_core_status & 2>/dev/null
       change_dns "$enable_redirect_dns" "$disable_masq_cache"
       SLOG_CLEAN
       del_lock
