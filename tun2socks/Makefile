@@ -2,11 +2,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=tun2socks
 PKG_VERSION:=2.5.2
-PKG_RELEASE:=10
+PKG_RELEASE:=17
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/xjasonlyu/tun2socks.git
-PKG_SOURCE_VERSION:=a821cc483cd18648a882f7f0a88aa73b48beb20f
+PKG_SOURCE_VERSION:=b65d23180cc579a0830edb9040375427b76dd55e
 
 PKG_MAINTAINER:=Konstantine Shevlakov <shevlako@132lan.ru>
 PKG_LICENSE:=GPL-3.0
@@ -29,13 +29,15 @@ define Package/$(PKG_NAME)
   CATEGORY:=Network
   TITLE:=tun to socks proxy redirector written on golang
   URL:=https://github.com/xjasonlyu/tun2socks
-  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle
+  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle \
+	   +kmod-tun +ip-full +coreutils-base64
 endef
 
 define Package/$(PKG_NAME)/install
 	$(call GoPackage/Package/Install/Bin,$(PKG_INSTALL_DIR))
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/$(PKG_NAME) $(1)/usr/sbin/
+	$(CP) ./root/* $(1)/
 endef
 
 $(eval $(call GoBinPackage,$(PKG_NAME)))

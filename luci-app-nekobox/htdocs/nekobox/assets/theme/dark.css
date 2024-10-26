@@ -1,5 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Roboto:wght@400;700&display=swap');
-
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Roboto:wght@400;700&family=Cinzel+Decorative:wght@700;900&display=swap');
 [data-bs-theme=dark] {
   color-scheme: dark;
   --bs-body-font-family: 'Roboto', sans-serif;
@@ -11,7 +11,7 @@
   --bs-success: #00c853;
   --bs-info: #2196f3;
   --bs-warning: #ffd600;
-  --bs-danger: #cf6679;
+
   --bs-heading-font-family: 'Montserrat', sans-serif;
   --bs-heading-1: #17a2b8; 
   --bs-heading-2: #4169E1;
@@ -30,6 +30,11 @@
   --bs-shadow-medium: 0 8px 16px rgba(0, 0, 0, 0.3);
   --bs-shadow-heavy: 0 12px 24px rgba(0, 0, 0, 0.4);
   --bs-transition-speed: 0.3s;
+
+  --bs-btn-color: #fff;
+  --bs-btn-hover-color: #fff;
+  --bs-btn-active-color: #fff;
+  --bs-btn-disabled-color: #fff;
 }
 
 body {
@@ -307,3 +312,54 @@ h1:hover, h2:hover, h3:hover, h4:hover, h5:hover, h6:hover {
   transition: all 0.3s ease;
 }
 
+.royal-style { 
+    font-family: 'Cinzel Decorative', cursive;
+    font-weight: 900;
+    font-size: 80px;
+    color: var(--bs-primary);
+    text-shadow: 
+        2px 2px 4px rgba(142, 68, 173, 0.7),
+        0 0 20px rgba(142, 68, 173, 0.3);
+    letter-spacing: 4px;
+    text-align: center;
+    margin-top: 20px;
+    transition: all var(--bs-transition-speed);
+}
+
+.royal-style:hover {
+    transform: skew(-5deg);
+    text-shadow: 3px 3px 6px rgba(0,0,0,0.2);
+}
+
+.btn-outline-info.btn-yacd,
+.btn-outline-info.btn-dashboard,
+.btn-outline-info.btn-meta {
+  color: #fff !important;
+}
+
+.btn-outline-info.btn-yacd:hover,
+.btn-outline-info.btn-dashboard:hover,
+.btn-outline-info.btn-meta:hover,
+.btn-outline-info.btn-yacd:focus,
+.btn-outline-info.btn-dashboard:focus,
+.btn-outline-info.btn-meta:focus {
+  color: #fff !important;
+}
+
+@media (max-width: 767px) {
+    .row.justify-content-md-center .col.input-group.mb-3.justify-content-md-center {
+        display: flex;
+        justify-content: center;
+    }
+
+    .row.justify-content-md-center .col.input-group.mb-3.justify-content-md-center .btn-info {
+        width: auto;
+        min-width: 200px;
+    }
+}
+
+@media (max-width: 767px) {
+    .btn {
+        font-size: 10px; 
+    }
+}

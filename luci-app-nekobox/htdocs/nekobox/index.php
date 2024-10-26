@@ -1,6 +1,5 @@
 <?php
 include './cfg.php';
-include './devinfo.php';
 
 $str_cfg = substr($selected_config, strlen("$neko_dir/config") + 1);
 $_IMG = '/luci-static/ssr/';
@@ -21,22 +20,29 @@ $start_script_template = <<<'EOF'
 SINGBOX_LOG="%s"
 CONFIG_FILE="%s"
 SINGBOX_BIN="%s"
+FIREWALL_LOG="%s"
 
 mkdir -p "$(dirname "$SINGBOX_LOG")"
+mkdir -p "$(dirname "$FIREWALL_LOG")"
 touch "$SINGBOX_LOG"
+touch "$FIREWALL_LOG"
 chmod 644 "$SINGBOX_LOG"
+chmod 644 "$FIREWALL_LOG"
 
 exec >> "$SINGBOX_LOG" 2>&1
 
-echo "[$(date)] Starting Sing-box with config: $CONFIG_FILE"
+log() {
+    echo "[$(date)] $1" >> "$FIREWALL_LOG"
+}
 
-echo "Restarting firewall..."
+log "Starting Sing-box with config: $CONFIG_FILE"
+
+log "Restarting firewall..."
 /etc/init.d/firewall restart
 sleep 2
 
 if command -v fw4 > /dev/null; then
-    echo "FW4 Detected."
-    echo "Starting nftables."
+    log "FW4 Detected. Starting nftables."
 
     nft flush ruleset
     
@@ -103,8 +109,7 @@ table inet singbox {
 NFTABLES
 
 elif command -v fw3 > /dev/null; then
-    echo "FW3 Detected."
-    echo "Starting iptables."
+    log "FW3 Detected. Starting iptables."
 
     iptables -t mangle -F
     iptables -t mangle -X
@@ -177,18 +182,18 @@ elif command -v fw3 > /dev/null; then
     ip6tables -t mangle -A PREROUTING -i eth0 -p udp -j singbox-tproxy
 
 else
-    echo "Neither fw3 nor fw4 detected, unable to configure firewall rules."
+    log "Neither fw3 nor fw4 detected, unable to configure firewall rules."
     exit 1
 fi
 
-echo "Firewall rules applied successfully"
-echo "Starting sing-box with config: $CONFIG_FILE"
+log "Firewall rules applied successfully"
+log "Starting sing-box with config: $CONFIG_FILE"
 exec "$SINGBOX_BIN" run -c "$CONFIG_FILE"
 EOF;
 
 function createStartScript($configFile) {
-    global $start_script_template, $singbox_bin, $singbox_log;
-    $script = sprintf($start_script_template, $singbox_log, $configFile, $singbox_bin);
+    global $start_script_template, $singbox_bin, $singbox_log, $log; 
+    $script = sprintf($start_script_template, $singbox_log, $configFile, $singbox_bin, $log);
     
     $dir = dirname('/etc/neko/core/start.sh');
     if (!file_exists($dir)) {
@@ -200,16 +205,19 @@ function createStartScript($configFile) {
     
     writeToLog("Created start script with config: $configFile");
     writeToLog("Singbox binary: $singbox_bin");
-    writeToLog("Log file: $singbox_log");
+    writeToLog("Log file: $singbox_log"); 
+    writeToLog("Firewall log file: $log");
 }
 
 function writeToLog($message) {
-   global $log;
-   $time = date('H:i:s');
-   $logMessage = "[ $time ] $message\n";
-   if (file_put_contents($log, $logMessage, FILE_APPEND) === false) {
-       error_log("Failed to write to log file: $log");
-   }
+    global $log;
+    $dateTime = new DateTime();
+    $dateTime->modify('+8 hours');  
+    $time = $dateTime->format('H:i:s');
+    $logMessage = "[ $time ] $message\n";
+    if (file_put_contents($log, $logMessage, FILE_APPEND) === false) {
+        error_log("Failed to write to log file: $log");
+    }
 }
 
 function rotateLogs($logFile, $maxSize = 1048576) {
@@ -451,6 +459,50 @@ $neko_log_content = readLogFile("$neko_dir/tmp/neko_log.txt");
 $singbox_log_content = readLogFile($singbox_log);
 ?>
 
+<?php
+$isNginx = false;
+if (isset($_SERVER['SERVER_SOFTWARE']) && strpos($_SERVER['SERVER_SOFTWARE'], 'nginx') !== false) {
+    $isNginx = true;
+}
+?>
+
+<?php
+$systemIP = $_SERVER['SERVER_ADDR'];
+$dt=json_decode((shell_exec("ubus call system board")), true);
+$devices=$dt['model'];
+
+$kernelv = exec("cat /proc/sys/kernel/ostype"); 
+$osrelease = exec("cat /proc/sys/kernel/osrelease"); 
+$OSVer = $dt['release']['distribution'] . ' ' . $dt['release']['version']; 
+$kernelParts = explode('.', $osrelease, 3);
+$kernelv = 'Linux ' . 
+           (isset($kernelParts[0]) ? $kernelParts[0] : '') . '.' . 
+           (isset($kernelParts[1]) ? $kernelParts[1] : '') . '.' . 
+           (isset($kernelParts[2]) ? $kernelParts[2] : '');
+$kernelv = strstr($kernelv, '-', true) ?: $kernelv;
+$fullOSInfo = $kernelv . ' ' . $OSVer;
+
+
+$tmpramTotal=exec("cat /proc/meminfo | grep MemTotal | awk '{print $2}'");
+$tmpramAvailable=exec("cat /proc/meminfo | grep MemAvailable | awk '{print $2}'");
+
+$ramTotal=number_format(($tmpramTotal/1000),1);
+$ramAvailable=number_format(($tmpramAvailable/1000),1);
+$ramUsage=number_format((($tmpramTotal-$tmpramAvailable)/1000),1);
+
+$raw_uptime = exec("cat /proc/uptime | awk '{print $1}'");
+$days = floor($raw_uptime / 86400);
+$hours = floor(($raw_uptime / 3600) % 24);
+$minutes = floor(($raw_uptime / 60) % 60);
+$seconds = $raw_uptime % 60;
+
+$cpuLoad = shell_exec("cat /proc/loadavg");
+$cpuLoad = explode(' ', $cpuLoad);
+$cpuLoadAvg1Min = round($cpuLoad[0], 2);
+$cpuLoadAvg5Min = round($cpuLoad[1], 2);
+$cpuLoadAvg15Min = round($cpuLoad[2], 2);
+?>
+
 <!doctype html>
 <html lang="en" data-bs-theme="<?php echo substr($neko_theme,0,-4) ?>">
   <head>
@@ -465,7 +517,24 @@ $singbox_log_content = readLogFile($singbox_log);
     <script type="text/javascript" src="./assets/js/jquery-2.1.3.min.js"></script>
     <script type="text/javascript" src="./assets/js/neko.js"></script>
   </head>
-  <body>
+<body>
+    <?php if ($isNginx): ?>
+    <div id="nginxWarning" class="alert alert-warning alert-dismissible fade show" role="alert" style="position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 1050;">
+        <strong>警告！</strong> 检测到您正在使用Nginx。本插件不支持Nginx，请使用Uhttpd构建固件。
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+    <script>
+    setTimeout(function() {
+        var warningAlert = document.getElementById('nginxWarning');
+        if (warningAlert) {
+            warningAlert.classList.remove('show');
+            setTimeout(function() {
+                warningAlert.remove();
+            }, 300);
+        }
+    }, 5000);
+    </script>
+    <?php endif; ?>
 <div class="container-sm container-bg callout border border-3 rounded-4 col-11">
     <div class="row">
         <a href="#" class="col btn btn-lg">🏠 首页</a>
@@ -504,7 +573,7 @@ $(document).ready(function() {
 });
 </script>
 
-<h2 class="text-center p-2">NekoBox</h2>
+<h2 class="royal-style">NekoBox</h2>
  <div style="border: 1px solid black; padding: 10px; ">  
    <br>
 <?php
@@ -838,24 +907,22 @@ $lang = $_GET['lang'] ?? 'en';
     </tbody>
 </table>
 
-    <h2 class="text-center p-2" >系统信息</h2>
+    <style>
+        .icon-container { display: flex; justify-content: space-between; margin-top: 20px; }
+        .icon { text-align: center; width: 30%; }
+        .icon i { font-size: 48px; }
+    </style>
+    <link rel="stylesheet" href="./assets/bootstrap/all.min.css">
+    <div class="container">
+    <h2 class="text-center p-2" >系统状态</h2>
     <table class="table table-borderless rounded-4 mb-2">
         <tbody>
-            <tr>
-                <td>型号</td>
-                <td class="col-7"><?php echo $devices ?></td>
+                <td>系统信息</td>
+                <td class="col-7"><?php echo  $devices . ' - ' . $fullOSInfo; ?></td>
             </tr>
             <tr>
                 <td>内存</td>
                 <td class="col-7"><?php echo "$ramUsage/$ramTotal MB" ?></td>
-            </tr>
-            <tr>
-                <td>固件版本</td>
-                <td class="col-7"><?php echo $OSVer ?></td>
-            </tr>
-            <tr>
-                <td>内核版本</td>
-                <td class="col-7"><?php echo $kernelv ?></td>
             </tr>
             <tr>
                 <td>平均负载</td>
@@ -867,7 +934,26 @@ $lang = $_GET['lang'] ?? 'en';
             </tr>
         </tbody>
     </table>
-  <br>
+
+        <div class="icon-container">
+            <div class="icon">
+                <i class="fas fa-microchip"></i>
+                <p>CPU</p>
+                <p><?php echo isset($cpuLoadAvg1Min) ? $cpuLoadAvg1Min : 'N/A'; ?></p>
+            </div>
+            <div class="icon">
+                <i class="fas fa-memory"></i>
+                <p>内存</p>
+                <p><?php echo (isset($ramUsage) && isset($ramTotal)) ? $ramUsage . ' / ' . $ramTotal . ' MB' : 'N/A'; ?></p>
+            </div>
+            <div class="icon">
+                <i class="fas fa-exchange-alt"></i>
+                <p>交换空间</p>
+                <p>N/A</p>
+            </div>
+        </div>
+    </div>
+
 <div style="border: 1px solid black; padding: 10px; text-align: center;">
     <table style="width: 100%;">
         <tbody>
@@ -889,7 +975,7 @@ $lang = $_GET['lang'] ?? 'en';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         .log-container {
-            height: 300px;
+            height: 270px; 
             overflow-y: auto;
             overflow-x: hidden;
             white-space: pre-wrap;
@@ -903,7 +989,7 @@ $lang = $_GET['lang'] ?? 'en';
 <body>
     <h2 class="text-center my-4">日志</h2>
     <div class="row">
-        <div class="col-md-4">
+        <div class="col-12"> 
             <div class="card log-card">
                 <div class="card-header">
                     <h4 class="card-title text-center mb-0">NeKoBox 日志</h4>
@@ -918,7 +1004,9 @@ $lang = $_GET['lang'] ?? 'en';
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
+    </div>
+    <div class="row">
+        <div class="col-12">
             <div class="card log-card">
                 <div class="card-header">
                     <h4 class="card-title text-center mb-0">Mihomo 日志</h4>
@@ -933,48 +1021,87 @@ $lang = $_GET['lang'] ?? 'en';
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
-            <div class="card log-card">
-                <div class="card-header">
-                    <h4 class="card-title text-center mb-0">Sing-box 日志</h4>
-                </div>
-                <div class="card-body">
-                    <pre id="singbox_log" class="log-container form-control"></pre>
-                </div>
-                <div class="card-footer text-center">
-                    <form action="index.php" method="post">
-                        <button type="submit" name="clear_singbox_log" class="btn btn-danger">🗑️ 清空日志</button>
-                    </form>
-                </div>
+    </div>
+<div class="row">
+    <div class="col-12">
+        <div class="card log-card">
+            <div class="card-header">
+                <h4 class="card-title text-center mb-0">Sing-box 日志</h4>
+            </div>
+            <div class="card-body">
+                <pre id="singbox_log" class="log-container form-control"></pre>
+            </div>
+            <div class="card-footer text-center">
+                <form action="index.php" method="post" class="d-inline-block">
+                    <div class="form-check form-check-inline mb-2">
+                        <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+                        <label class="form-check-label" for="autoRefresh">自动刷新</label>
+                    </div>
+                    <button type="submit" name="clear_singbox_log" class="btn btn-danger">🗑️ 清空日志</button>
+                    <button type="submit" name="update_log" value="update" class="btn btn-primary">🔄 更新时区</button>
+                </form>
             </div>
         </div>
     </div>
-    <script src="./assets/js/bootstrap.bundle.min.js"></script>
-    <script>
-        function scrollToBottom(elementId) {
-            var logElement = document.getElementById(elementId);
-            logElement.scrollTop = logElement.scrollHeight;
+</div>
+
+<?php
+if (isset($_POST['update_log'])) {
+    $logFilePath = '/www/nekobox/lib/log.php'; 
+    $url = 'https://raw.githubusercontent.com/Thaolga/neko/main/log.php'; 
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);     
+    $newLogContent = curl_exec($ch);
+    curl_close($ch);
+    if ($newLogContent !== false) {
+        file_put_contents($logFilePath, $newLogContent);
+        echo "<script>alert('时区已更新成功！');</script>";
+    } else {
+        echo "<script>alert('更新时区失败！');</script>";
+    }
+}
+?>
+
+<script src="./assets/js/bootstrap.bundle.min.js"></script>
+<script>
+    function scrollToBottom(elementId) {
+        var logElement = document.getElementById(elementId);
+        logElement.scrollTop = logElement.scrollHeight;
+    }
+
+    function fetchLogs() {
+        if (!document.getElementById('autoRefresh').checked) {
+            return;
         }
-        function fetchLogs() {
-            Promise.all([
-                fetch('fetch_logs.php?file=plugin_log'),
-                fetch('fetch_logs.php?file=mihomo_log'),
-                fetch('fetch_logs.php?file=singbox_log')
-            ])
-            .then(responses => Promise.all(responses.map(res => res.text())))
-            .then(data => {
-                document.getElementById('plugin_log').textContent = data[0];
-                document.getElementById('bin_logs').textContent = data[1];
-                document.getElementById('singbox_log').textContent = data[2];
-                scrollToBottom('plugin_log');
-                scrollToBottom('bin_logs');
-                scrollToBottom('singbox_log');
-            })
-            .catch(err => console.error('Error fetching logs:', err));
+        Promise.all([
+            fetch('fetch_logs.php?file=plugin_log'),
+            fetch('fetch_logs.php?file=mihomo_log'),
+            fetch('fetch_logs.php?file=singbox_log')
+        ])
+        .then(responses => Promise.all(responses.map(res => res.text())))
+        .then(data => {
+            document.getElementById('plugin_log').textContent = data[0];
+            document.getElementById('bin_logs').textContent = data[1];
+            document.getElementById('singbox_log').textContent = data[2];
+            scrollToBottom('plugin_log');
+            scrollToBottom('bin_logs');
+            scrollToBottom('singbox_log');
+        })
+        .catch(err => console.error('Error fetching logs:', err));
+    }
+
+    fetchLogs();
+    let intervalId = setInterval(fetchLogs, 5000);
+
+    document.getElementById('autoRefresh').addEventListener('change', function() {
+        if (this.checked) {
+            intervalId = setInterval(fetchLogs, 5000);
+        } else {
+            clearInterval(intervalId);
         }
-        fetchLogs();
-        setInterval(fetchLogs, 5000);
-    </script>
+    });
+</script>
 </body>
 </html>
     <footer class="text-center">

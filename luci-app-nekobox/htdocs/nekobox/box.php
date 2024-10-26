@@ -17,16 +17,27 @@ include './cfg.php';
     <script type="text/javascript" src="./assets/js/neko.js"></script>
 </head>
 <body>
+<style>
+@media (max-width: 767px) {
+    .row a {
+        font-size: 9px; 
+    }
+}
+
+.table-responsive {
+    width: 100%;
+}
+</style>
 <div class="container-sm container-bg callout border border-3 rounded-4 col-11">
     <div class="row">
         <a href="./index.php" class="col btn btn-lg">🏠 首页</a>
-        <a href="./upload.php" class="col btn btn-lg">📂 Mihomo</a>
-        <a href="./upload_sb.php" class="col btn btn-lg">🗂️ Sing-box</a>
-        <a href="./box.php" class="col btn btn-lg">💹 转换</a>
-        <a href="./nekobox.php" class="col btn btn-lg">📦 文件助手</a>
+        <a href="./mihomo_manager.php" class="col btn btn-lg">📂 Mihomo</a>
+        <a href="./singbox_manager.php" class="col btn btn-lg">🗂️ Sing-box</a>
+        <a href="./box.php" class="col btn btn-lg">💹 订阅转换</a>
+        <a href="./filekit.php" class="col btn btn-lg">📦 文件助手</a>
 <div class="outer-container">
     <div class="container">
-        <h1 class="title text-center">Sing-box 订阅转换模板</h1>
+        <h1 class="title text-center" style="margin-top: 3rem; margin-bottom: 2rem;">Sing-box 订阅转换模板</h1>
         <div class="alert alert-info">
             <h4 class="alert-heading">帮助信息</h4>
             <p>请选择一个模板以生成配置文件：根据订阅节点信息选择对应模板，否则启动不了。</p>
@@ -131,7 +142,7 @@ include './cfg.php';
             echo "<div class='result-container'>";
             echo "<form method='post' action=''>";
             echo "<div class='mb-3'>";
-            echo "<textarea id='configContent' name='configContent' class='form-control'>" . htmlspecialchars($downloadedContent) . "</textarea>";
+            echo "<textarea id='configContent' name='configContent' class='form-control' style='height: 300px;'>" . htmlspecialchars($downloadedContent) . "</textarea>";
             echo "</div>";
             echo "<div class='text-center'>";
             echo "<button class='btn btn-info' type='button' onclick='copyToClipboard()'><i class='fas fa-copy'></i> 复制到剪贴</button>";
@@ -140,10 +151,9 @@ include './cfg.php';
             echo "</div>";
             echo "</form>";
             echo "</div>";
-
-            echo "<div class='alert alert-info'>";
+            echo "<div class='alert alert-info' style='word-wrap: break-word; overflow-wrap: break-word;'>";
             foreach ($logMessages as $message) {
-                echo $message . "<br>";
+            echo $message . "<br>";
             }
             echo "</div>";
         }
