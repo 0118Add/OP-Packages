@@ -42,7 +42,6 @@ return baseclass.extend({
 			L.resolveDefault(callSystemInfo(), {}),
 			L.resolveDefault(callCPUBench(), {}),
 			L.resolveDefault(callCPUInfo(), {}),
-			L.resolveDefault(callCPUUsage(), {}),
 			L.resolveDefault(callTempInfo(), {}),
 			L.resolveDefault(callLuciVersion(), { revision: _('unknown version'), branch: 'LuCI' })
 		]);
