@@ -9,7 +9,7 @@ import { cursor } from 'uci';
 import { urldecode, urlencode } from 'luci.http';
 
 import {
-	isEmpty, strToBool, strToInt,
+	isEmpty, strToBool, strToInt, durationToSecond,
 	removeBlankAttrs,
 	HM_DIR, RUN_DIR, PRESET_OUTBOUND
 } from 'fchomo';
@@ -40,7 +40,8 @@ const ucisniff = 'sniff',
       ucipgrp = 'proxy_group',
       uciprov = 'provider',
       ucirule = 'ruleset',
-      ucirout = 'rules';
+      ucirout = 'rules',
+      ucisubro = 'subrules';
 
 /* Hardcode options */
 const common_tcpport = uci.get(uciconf, ucifchm, 'common_tcpport') || '20-21,22,53,80,110,143,443,465,853,873,993,995,8080,8443,9418',
@@ -68,7 +69,7 @@ const listen_interfaces = uci.get(uciconf, uciroute, 'listen_interfaces') || nul
       lan_proxy_ipv6_ips = uci.get(uciconf, uciroute, 'lan_proxy_ipv6_ips') || null,
       lan_proxy_mac_addrs = uci.get(uciconf, uciroute, 'lan_proxy_mac_addrs') || null,
       proxy_router = (uci.get(uciconf, uciroute, 'proxy_router') === '0') ? null : true,
-      default_proxy = uci.get(uciconf, uciroute, 'default_proxy') || null,
+      client_enabled = uci.get(uciconf, uciroute, 'client_enabled') || '0',
       routing_tcpport = uci.get(uciconf, uciroute, 'routing_tcpport') || null,
       routing_udpport = uci.get(uciconf, uciroute, 'routing_udpport') || null,
       routing_mode = uci.get(uciconf, uciroute, 'routing_mode') || null,
@@ -103,28 +104,6 @@ function parse_filter(cfg) {
 		return join('|', cfg);
 	else
 		return cfg;
-}
-
-function parse_time_duration(time) {
-	if (isEmpty(time))
-		return null;
-
-	let seconds = 0;
-	let arr = match(time, /^(\d+)(s|m|h|d)?$/);
-	if (arr) {
-		if (arr[2] === 's') {
-			seconds = strToInt(arr[1]);
-		} else if (arr[2] === 'm') {
-			seconds = strToInt(arr[1]) * 60;
-		} else if (arr[2] === 'h') {
-			seconds = strToInt(arr[1]) * 3600;
-		} else if (arr[2] === 'd') {
-			seconds = strToInt(arr[1]) * 86400;
-		} else
-			seconds = strToInt(arr[1]);
-	}
-
-	return seconds;
 }
 
 function get_proxynode(cfg) {
@@ -176,6 +155,24 @@ function get_nameserver(cfg, detour) {
 
 	return servers;
 }
+
+function parse_entry(cfg) {
+	if (isEmpty(cfg))
+		return null;
+
+	let arr = split(cfg, ',');
+	if (arr[0] === 'MATCH') {
+		arr[1] = get_proxygroup(arr[1]);
+	} else if (arr[0] === 'SUB-RULE') {
+		arr[1] = replace(arr[1], /ꓹ|‚/g, ','); // U+A4F9 | U+201A
+		arr[2] = replace(arr[2], /ꓹ|‚/g, ','); // U+A4F9 | U+201A
+	} else {
+		arr[1] = replace(arr[1], /ꓹ|‚/g, ','); // U+A4F9 | U+201A
+		arr[2] = get_proxygroup(arr[2]);
+	}
+
+	return join(',', arr);
+}
 /* Config helper END */
 
 /* Main */
@@ -191,8 +188,8 @@ config["etag-support"] = (uci.get(uciconf, uciglobal, 'etag_support') === '0') ?
 config.ipv6 = (uci.get(uciconf, uciglobal, 'ipv6') === '0') ? false : true;
 config["unified-delay"] = strToBool(uci.get(uciconf, uciglobal, 'unified_delay')) || false;
 config["tcp-concurrent"] = strToBool(uci.get(uciconf, uciglobal, 'tcp_concurrent')) || false;
-config["keep-alive-interval"] = parse_time_duration(uci.get(uciconf, uciglobal, 'keep_alive_interval')) || 30;
-config["keep-alive-idle"] = parse_time_duration(uci.get(uciconf, uciglobal, 'keep_alive_idle')) || 600;
+config["keep-alive-interval"] = durationToSecond(uci.get(uciconf, uciglobal, 'keep_alive_interval')) || 30;
+config["keep-alive-idle"] = durationToSecond(uci.get(uciconf, uciglobal, 'keep_alive_idle')) || 600;
 /* ACL settings */
 config["interface-name"] = bind_interface;
 config["routing-mark"] = self_mark;
@@ -345,7 +342,7 @@ if (match(proxy_mode, /tun/))
 		"route-exclude-address-set": [],
 		"include-interface": [],
 		"exclude-interface": [],
-		"udp-timeout": parse_time_duration(uci.get(uciconf, uciinbound, 'tun_udp_timeout')) || 300,
+		"udp-timeout": durationToSecond(uci.get(uciconf, uciinbound, 'tun_udp_timeout')) || 300,
 		"endpoint-independent-nat": strToBool(uci.get(uciconf, uciinbound, 'tun_endpoint_independent_nat')),
 		"auto-detect-interface": true
 	});
@@ -452,7 +449,7 @@ uci.foreach(uciconf, ucipgrp, (cfg) => {
 		["routing-mark"]: strToInt(cfg.routing_mark),
 		// Health fields
 		url: cfg.url,
-		interval: cfg.url ? parse_time_duration(cfg.interval) || 600 : null,
+		interval: cfg.url ? durationToSecond(cfg.interval) || 600 : null,
 		timeout: cfg.url ? strToInt(cfg.timeout) || 5000 : null,
 		lazy: (cfg.lazy === '0') ? false : null,
 		"expected-status": cfg.url ? cfg.expected_status || '204' : null,
@@ -476,7 +473,7 @@ uci.foreach(uciconf, uciprov, (cfg) => {
 		type: cfg.type,
 		path: HM_DIR + '/provider/' + cfg['.name'],
 		url: cfg.url,
-		interval: (cfg.type === 'http') ? parse_time_duration(cfg.interval) || 86400 : null,
+		interval: (cfg.type === 'http') ? durationToSecond(cfg.interval) || 86400 : null,
 		proxy: get_proxygroup(cfg.proxy),
 		header: cfg.header ? json(cfg.header) : null,
 		"health-check": {},
@@ -513,7 +510,7 @@ uci.foreach(uciconf, uciprov, (cfg) => {
 		config["proxy-providers"][cfg['.name']]["health-check"] = {
 			enable: true,
 			url: cfg.health_url,
-			interval: parse_time_duration(cfg.health_interval) || 600,
+			interval: durationToSecond(cfg.health_interval) || 600,
 			timeout: strToInt(cfg.health_timeout) || 5000,
 			lazy: (cfg.health_lazy === '0') ? false : null,
 			"expected-status": cfg.health_expected_status || '204'
@@ -535,7 +532,7 @@ uci.foreach(uciconf, ucirule, (cfg) => {
 		behavior: cfg.behavior,
 		path: HM_DIR + '/ruleset/' + cfg['.name'],
 		url: cfg.url,
-		interval: (cfg.type === 'http') ? parse_time_duration(cfg.interval) || 259200 : null,
+		interval: (cfg.type === 'http') ? durationToSecond(cfg.interval) || 259200 : null,
 		proxy: get_proxygroup(cfg.proxy)
 	};
 });
@@ -551,14 +548,21 @@ uci.foreach(uciconf, ucirout, (cfg) => {
 	if (cfg.enabled === '0')
 		return null;
 
-	push(config.rules, function(arr) {
-			arr[1] = replace(arr[1], /ꓹ|‚/g, ','); // U+A4F9 | U+201A
-			arr[2] = get_proxygroup(arr[2]);
-			return join(',', arr);
-		}(split(cfg.entry, ','))
-	);
+	push(config.rules, parse_entry(cfg.entry));
 });
-push(config.rules, 'MATCH,' + get_proxygroup(default_proxy));
 /* Routing rules END */
+
+/* Sub rules START */
+/* Sub rules */
+config["sub-rules"] = {};
+uci.foreach(uciconf, ucisubro, (cfg) => {
+	if (cfg.enabled === '0')
+		return null;
+
+	if (!config["sub-rules"][cfg.group])
+		config["sub-rules"][cfg.group] = [];
+	push(config["sub-rules"][cfg.group], parse_entry(cfg.entry));
+});
+/* Sub rules END */
 
 printf('%.J\n', removeBlankAttrs(config));

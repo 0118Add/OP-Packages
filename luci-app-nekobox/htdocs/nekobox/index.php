@@ -467,42 +467,52 @@ if (isset($_SERVER['SERVER_SOFTWARE']) && strpos($_SERVER['SERVER_SOFTWARE'], 'n
 ?>
 
 <?php
-$systemIP = $_SERVER['SERVER_ADDR'];
-$dt=json_decode((shell_exec("ubus call system board")), true);
-$devices=$dt['model'];
+if (isset($_GET['ajax'])) {
+    $dt = json_decode(shell_exec("ubus call system board"), true);
+    $devices = $dt['model'];
 
-$kernelv = exec("cat /proc/sys/kernel/ostype"); 
-$osrelease = exec("cat /proc/sys/kernel/osrelease"); 
-$OSVer = $dt['release']['distribution'] . ' ' . $dt['release']['version']; 
-$kernelParts = explode('.', $osrelease, 3);
-$kernelv = 'Linux ' . 
-           (isset($kernelParts[0]) ? $kernelParts[0] : '') . '.' . 
-           (isset($kernelParts[1]) ? $kernelParts[1] : '') . '.' . 
-           (isset($kernelParts[2]) ? $kernelParts[2] : '');
-$kernelv = strstr($kernelv, '-', true) ?: $kernelv;
-$fullOSInfo = $kernelv . ' ' . $OSVer;
+    $kernelv = exec("cat /proc/sys/kernel/ostype"); 
+    $osrelease = exec("cat /proc/sys/kernel/osrelease"); 
+    $OSVer = $dt['release']['distribution'] . ' ' . $dt['release']['version']; 
+    $kernelParts = explode('.', $osrelease, 3);
+    $kernelv = 'Linux ' . 
+               (isset($kernelParts[0]) ? $kernelParts[0] : '') . '.' . 
+               (isset($kernelParts[1]) ? $kernelParts[1] : '') . '.' . 
+               (isset($kernelParts[2]) ? $kernelParts[2] : '');
+    $kernelv = strstr($kernelv, '-', true) ?: $kernelv;
+    $fullOSInfo = $kernelv . ' ' . $OSVer;
 
+    $tmpramTotal = exec("cat /proc/meminfo | grep MemTotal | awk '{print $2}'");
+    $tmpramAvailable = exec("cat /proc/meminfo | grep MemAvailable | awk '{print $2}'");
 
-$tmpramTotal=exec("cat /proc/meminfo | grep MemTotal | awk '{print $2}'");
-$tmpramAvailable=exec("cat /proc/meminfo | grep MemAvailable | awk '{print $2}'");
+    $ramTotal = number_format(($tmpramTotal / 1000), 1);
+    $ramAvailable = number_format(($tmpramAvailable / 1000), 1);
+    $ramUsage = number_format((($tmpramTotal - $tmpramAvailable) / 1000), 1);
 
-$ramTotal=number_format(($tmpramTotal/1000),1);
-$ramAvailable=number_format(($tmpramAvailable/1000),1);
-$ramUsage=number_format((($tmpramTotal-$tmpramAvailable)/1000),1);
+    $raw_uptime = exec("cat /proc/uptime | awk '{print $1}'");
+    $days = floor($raw_uptime / 86400);
+    $hours = floor(($raw_uptime / 3600) % 24);
+    $minutes = floor(($raw_uptime / 60) % 60);
+    $seconds = $raw_uptime % 60;
 
-$raw_uptime = exec("cat /proc/uptime | awk '{print $1}'");
-$days = floor($raw_uptime / 86400);
-$hours = floor(($raw_uptime / 3600) % 24);
-$minutes = floor(($raw_uptime / 60) % 60);
-$seconds = $raw_uptime % 60;
+    $cpuLoad = shell_exec("cat /proc/loadavg");
+    $cpuLoad = explode(' ', $cpuLoad);
+    $cpuLoadAvg1Min = round($cpuLoad[0], 2);
+    $cpuLoadAvg5Min = round($cpuLoad[1], 2);
+    $cpuLoadAvg15Min = round($cpuLoad[2], 2);
 
-$cpuLoad = shell_exec("cat /proc/loadavg");
-$cpuLoad = explode(' ', $cpuLoad);
-$cpuLoadAvg1Min = round($cpuLoad[0], 2);
-$cpuLoadAvg5Min = round($cpuLoad[1], 2);
-$cpuLoadAvg15Min = round($cpuLoad[2], 2);
+    echo json_encode([
+        'systemInfo' => "$devices - $fullOSInfo",
+        'ramUsage' => "$ramUsage/$ramTotal MB",
+        'cpuLoad' => "$cpuLoadAvg1Min $cpuLoadAvg5Min $cpuLoadAvg15Min",
+        'uptime' => "{$days}天 {$hours}小时 {$minutes}分钟 {$seconds}秒",
+        'cpuLoadAvg1Min' => $cpuLoadAvg1Min,
+        'ramTotal' => $ramTotal,
+        'ramUsageOnly' => $ramUsage,
+    ]);
+    exit;
+}
 ?>
-
 <!doctype html>
 <html lang="en" data-bs-theme="<?php echo substr($neko_theme,0,-4) ?>">
   <head>
@@ -516,6 +526,7 @@ $cpuLoadAvg15Min = round($cpuLoad[2], 2);
     <script type="text/javascript" src="./assets/js/feather.min.js"></script>
     <script type="text/javascript" src="./assets/js/jquery-2.1.3.min.js"></script>
     <script type="text/javascript" src="./assets/js/neko.js"></script>
+    <?php include './ping.php'; ?>
   </head>
 <body>
     <?php if ($isNginx): ?>
@@ -540,7 +551,7 @@ $cpuLoadAvg15Min = round($cpuLoad[2], 2);
         <a href="#" class="col btn btn-lg">🏠 首页</a>
         <a href="./dashboard.php" class="col btn btn-lg">📊 面板</a>
         <a href="./configs.php" class="col btn btn-lg">⚙️ 配置</a>
-        <a href="/nekobox/mon.php" class="col btn btn-lg d-flex align-items-center justify-content-center"></i>📦 订阅</a> 
+        <a href="./mon.php" class="col btn btn-lg"></i>📦 订阅</a> 
         <a href="./settings.php" class="col btn btn-lg">🛠️ 设定</a>
     <div class="container-sm text-center col-8">
   <img src="./assets/img/nekobox.png">
@@ -572,476 +583,227 @@ $(document).ready(function() {
     });
 });
 </script>
-
 <h2 class="royal-style">NekoBox</h2>
- <div style="border: 1px solid black; padding: 10px; ">  
-   <br>
-<?php
-$translate = [
-    'United States' => '美国',
-    'China' => '中国',
-    'ISP' => '互联网服务提供商',
-    'Japan' => '日本',
-    'South Korea' => '韩国',
-    'Germany' => '德国',
-    'France' => '法国',
-    'United Kingdom' => '英国',
-    'Canada' => '加拿大',
-    'Australia' => '澳大利亚',
-    'Russia' => '俄罗斯',
-    'India' => '印度',
-    'Brazil' => '巴西',
-    'Netherlands' => '荷兰',
-    'Singapore' => '新加坡',
-    'Hong Kong' => '香港',
-    'Saudi Arabia' => '沙特阿拉伯',
-    'Turkey' => '土耳其',
-    'Italy' => '意大利',
-    'Spain' => '西班牙',
-    'Thailand' => '泰国',
-    'Malaysia' => '马来西亚',
-    'Indonesia' => '印度尼西亚',
-    'South Africa' => '南非',
-    'Mexico' => '墨西哥',
-    'Israel' => '以色列',
-    'Sweden' => '瑞典',
-    'Switzerland' => '瑞士',
-    'Norway' => '挪威',
-    'Denmark' => '丹麦',
-    'Belgium' => '比利时',
-    'Finland' => '芬兰',
-    'Poland' => '波兰',
-    'Austria' => '奥地利',
-    'Greece' => '希腊',
-    'Portugal' => '葡萄牙',
-    'Ireland' => '爱尔兰',
-    'New Zealand' => '新西兰',
-    'United Arab Emirates' => '阿拉伯联合酋长国',
-    'Argentina' => '阿根廷',
-    'Chile' => '智利',
-    'Colombia' => '哥伦比亚',
-    'Philippines' => '菲律宾',
-    'Vietnam' => '越南',
-    'Pakistan' => '巴基斯坦',
-    'Egypt' => '埃及',
-    'Nigeria' => '尼日利亚',
-    'Kenya' => '肯尼亚',
-    'Morocco' => '摩洛哥',
-    'Google' => '谷歌',
-    'Amazon' => '亚马逊',
-    'Microsoft' => '微软',
-    'Facebook' => '脸书',
-    'Apple' => '苹果',
-    'IBM' => 'IBM',
-    'Alibaba' => '阿里巴巴',
-    'Tencent' => '腾讯',
-    'Baidu' => '百度',
-    'Verizon' => '威瑞森',
-    'AT&T' => '美国电话电报公司',
-    'T-Mobile' => 'T-移动',
-    'Vodafone' => '沃达丰',
-    'China Telecom' => '中国电信',
-    'China Unicom' => '中国联通',
-    'China Mobile' => '中国移动', 
-    'Chunghwa Telecom' => '中华电信',   
-    'Amazon Web Services (AWS)' => '亚马逊网络服务 (AWS)',
-    'Google Cloud Platform (GCP)' => '谷歌云平台 (GCP)',
-    'Microsoft Azure' => '微软Azure',
-    'Oracle Cloud' => '甲骨文云',
-    'Alibaba Cloud' => '阿里云',
-    'Tencent Cloud' => '腾讯云',
-    'DigitalOcean' => '数字海洋',
-    'Linode' => '林诺德',
-    'OVHcloud' => 'OVH 云',
-    'Hetzner' => '赫兹纳',
-    'Vultr' => '沃尔特',
-    'OVH' => 'OVH',
-    'DreamHost' => '梦想主机',
-    'InMotion Hosting' => '动态主机',
-    'HostGator' => '主机鳄鱼',
-    'Bluehost' => '蓝主机',
-    'A2 Hosting' => 'A2主机',
-    'SiteGround' => '站点地',
-    'Liquid Web' => '液态网络',
-    'Kamatera' => '卡玛特拉',
-    'IONOS' => 'IONOS',
-    'InterServer' => '互联服务器',
-    'Hostwinds' => '主机之风',
-    'ScalaHosting' => '斯卡拉主机',
-    'GreenGeeks' => '绿色极客'
-];
-$lang = $_GET['lang'] ?? 'en';
-?>
+<style>
+   .section-container {
+       padding-left: 48px;  
+       padding-right: 48px;
+   }
 
-<!DOCTYPE html>
-<html lang="<?php echo htmlspecialchars($lang); ?>">
-<head>
-    <meta charset="utf-8">
-    <meta http-equiv="x-dns-prefetch-control" content="on">
-    <link rel="dns-prefetch" href="//cdn.jsdelivr.net">
-    <link rel="dns-prefetch" href="//whois.pconline.com.cn">
-    <link rel="dns-prefetch" href="//forge.speedtest.cn">
-    <link rel="dns-prefetch" href="//api-ipv4.ip.sb">
-    <link rel="dns-prefetch" href="//api.ipify.org">
-    <link rel="dns-prefetch" href="//api.ttt.sh">
-    <link rel="dns-prefetch" href="//qqwry.api.skk.moe">
-    <link rel="dns-prefetch" href="//d.skk.moe">
-    <link rel="preconnect" href="https://forge.speedtest.cn">
-    <link rel="preconnect" href="https://whois.pconline.com.cn">
-    <link rel="preconnect" href="https://api-ipv4.ip.sb">
-    <link rel="preconnect" href="https://api.ipify.org">
-    <link rel="preconnect" href="https://api.ttt.sh">
-    <link rel="preconnect" href="https://qqwry.api.skk.moe">
-    <link rel="preconnect" href="https://d.skk.moe">
-    <style>
-        body {
-            font-family: 'Montserrat', sans-serif;
-            line-height: 1.6;
-        }
-        .status {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: left;
-            flex-direction: row;
-            height: 50px;
-            letter-spacing: 0.5px;
-        }
-        .img-con {
-            margin-right: 3rem;
-        }
-        .img-con img {
-            width: 80px;
-            height: auto;
-        }
-        .block {
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-        }
-        .ip-address {
-            color: #2dce89;
-            font-weight: bold;
-            font-size: 1.1rem;
-            margin: 0;
-        }
-        .info {
-            color: #fb6340;
-            font-style: italic;
-            font-size: 1rem;
-            margin: 0;
-        }
-    </style>
-</head>
-<body>
-<?php if (in_array($lang, ['zh-cn', 'en', 'auto'])): ?>
-    <fieldset class="cbi-section">
-        <div class="status">
-            <div class="img-con">
-                <img src="/nekobox/assets/neko/img/loading.svg" id="flag" class="pure-img" title="国旗">
-            </div>
-            <div class="block">
-                <p id="d-ip" class="green ip-address">Checking...</p>
-                <p id="ipip" class="info"></p>
-            </div>
-        </div>
-    </fieldset>
-<?php endif; ?>
+   .btn-group .btn {
+       width: 120%;
+   }
 
-<script src="/nekobox/assets/neko/js/jquery.min.js"></script>
-<script type="text/javascript">
-    const _IMG = '/nekobox/assets/neko/';
-    const translate = <?php echo json_encode($translate, JSON_UNESCAPED_UNICODE); ?>;
-    let cachedIP = null;
-    let cachedInfo = null;
-    let random = parseInt(Math.random() * 100000000);
+   .log-container {
+       height: 270px; 
+       overflow-y: auto;
+       overflow-x: hidden;
+       white-space: pre-wrap;
+       word-wrap: break-word;
+   }
 
-    let IP = {
-        get: (url, type) =>
-            fetch(url, { method: 'GET' }).then((resp) => {
-                if (type === 'text')
-                    return Promise.all([resp.ok, resp.status, resp.text(), resp.headers]);
-                else
-                    return Promise.all([resp.ok, resp.status, resp.json(), resp.headers]);
-            }).then(([ok, status, data, headers]) => {
-                if (ok) {
-                    return { ok, status, data, headers };
-                } else {
-                    throw new Error(JSON.stringify(data.error));
-                }
-            }).catch(error => {
-                console.error("Error fetching data:", error);
-                throw error;
-            }),
-        Ipip: (ip, elID) => {
-            if (ip === cachedIP && cachedInfo) {
-                console.log("Using cached IP info");
-                IP.updateUI(cachedInfo, elID);
-            } else {
-                IP.get(`https://api.ip.sb/geoip/${ip}`, 'json')
-                    .then(resp => {
-                        cachedIP = ip;  
-                        cachedInfo = resp.data;  
-                        IP.updateUI(resp.data, elID);
-                    })
-                    .catch(error => {
-                        console.error("Error in Ipip function:", error);
-                    });
-            }
-        },
-        updateUI: (data, elID) => {
-            let country = translate[data.country] || data.country;
-            let isp = translate[data.isp] || data.isp;
-            let asnOrganization = translate[data.asn_organization] || data.asn_organization;
+   .log-card {
+       margin-bottom: 20px;
+   }
 
-            if (data.country === 'Taiwan') {
-                country = (navigator.language === 'en') ? 'China Taiwan' : '中国台湾';
-            }
-
-            document.getElementById(elID).innerHTML = `${country} ${isp} ${asnOrganization}`;
-            $("#flag").attr("src", _IMG + "flags/" + data.country + ".png");
-            document.getElementById(elID).style.color = '#FF00FF';
-        },
-        getIpipnetIP: () => {
-            if (cachedIP) {
-                document.getElementById('d-ip').innerHTML = cachedIP;
-                IP.updateUI(cachedInfo, 'ipip');
-            } else {
-                IP.get(`https://api.ipify.org?format=json&z=${random}`, 'json')
-                    .then((resp) => {
-                        let ip = resp.data.ip;
-                        cachedIP = ip; 
-                        document.getElementById('d-ip').innerHTML = ip;
-                        return ip;
-                    })
-                    .then(ip => {
-                        IP.Ipip(ip, 'ipip');
-                    })
-                    .catch(error => {
-                        console.error("Error in getIpipnetIP function:", error);
-                    });
-            }
-        }
+   @media (max-width: 1206px) {
+       td:first-child {
+       display: block;
+       width: 100%;
+       font-weight: bold;
+       margin-bottom: 5px;
     }
+    
+   td:last-child {
+       display: block;
+       width: 100%;
+   }
 
-    IP.getIpipnetIP();
-    setInterval(IP.getIpipnetIP, 5000);
+   .btn-group .btn {
+       font-size: 0.475rem;
+       white-space: nowrap;
+       padding: 0.375rem 0.5rem;
+   }
+
+   tr {
+       margin-bottom: 15px;
+       display: block;
+   }
+}
+</style>
+<div class="section-container">
+   <table class="table table-borderless mb-2">
+       <tbody>
+           <tr>
+               <td style="width:150px">状态</td>
+               <td class="d-grid">
+                   <div class="btn-group w-100" role="group" aria-label="ctrl">
+                       <?php
+                       if ($neko_status == 1) {
+                           echo "<button type=\"button\" class=\"btn btn-success\">Mihomo 运行中</button>\n";
+                       } else {
+                           echo "<button type=\"button\" class=\"btn btn-outline-danger\">Mihomo 未运行</button>\n";
+                       }
+                       echo "<button type=\"button\" class=\"btn btn-deepskyblue\">$str_cfg</button>\n";
+                       if ($singbox_status == 1) {
+                           echo "<button type=\"button\" class=\"btn btn-success\">Sing-box 运行中</button>\n";
+                       } else {
+                           echo "<button type=\"button\" class=\"btn btn-outline-danger\">Sing-box 未运行</button>\n";
+                       }
+                       ?>
+                   </div>
+               </td>
+           </tr>
+           <tr>
+               <td style="width:150px">控制</td>
+               <td class="d-grid">
+                   <form action="index.php" method="post">
+                       <div class="btn-group w-100">
+                           <button type="submit" name="neko" value="start" class="btn btn<?php if ($neko_status == 1) echo "-outline" ?>-success <?php if ($neko_status == 1) echo "disabled" ?>">启用 Mihomo</button>
+                           <button type="submit" name="neko" value="disable" class="btn btn<?php if ($neko_status == 0) echo "-outline" ?>-danger <?php if ($neko_status == 0) echo "disabled" ?>">停用 Mihomo</button>
+                           <button type="submit" name="neko" value="restart" class="btn btn<?php if ($neko_status == 0) echo "-outline" ?>-warning <?php if ($neko_status == 0) echo "disabled" ?>">重启 Mihomo</button>
+                       </div>
+                   </form>
+               </td>
+           </tr>
+           <tr>
+               <td style="width:150px"></td>
+               <td class="d-grid">
+                   <form action="index.php" method="post">
+                       <div class="input-group mb-2">
+                           <select name="config_file" id="config_file" class="form-select" onchange="saveConfigSelection()">
+                               <?php foreach ($availableConfigs as $config): ?>
+                                   <option value="<?= htmlspecialchars($config) ?>" <?= isset($_POST['config_file']) && $_POST['config_file'] === $config ? 'selected' : '' ?>>
+                                       <?= htmlspecialchars(basename($config)) ?>
+                                   </option>
+                               <?php endforeach; ?>
+                           </select>
+                       </div>
+                       <div class="btn-group w-100">
+                           <button type="submit" name="singbox" value="start" class="btn btn<?php echo ($singbox_status == 1) ? "-outline" : "" ?>-success <?php echo ($singbox_status == 1) ? "disabled" : "" ?>">启用 Sing-box</button>
+                           <button type="submit" name="singbox" value="disable" class="btn btn<?php echo ($singbox_status == 0) ? "-outline" : "" ?>-danger <?php echo ($singbox_status == 0) ? "disabled" : "" ?>">停用 Sing-box</button>
+                           <button type="submit" name="singbox" value="restart" class="btn btn<?php echo ($singbox_status == 0) ? "-outline" : "" ?>-warning <?php echo ($singbox_status == 0) ? "disabled" : "" ?>">重启 Sing-box</button>
+                       </div>
+                   </form>
+               </td>
+           </tr>
+           <tr>
+               <td style="width:150px">运行模式</td>
+               <td class="d-grid">
+                   <?php
+                   $mode_placeholder = '';
+                   if ($neko_status == 1) {
+                       $mode_placeholder = $neko_cfg['echanced'] . " | " . $neko_cfg['mode'];
+                   } elseif ($singbox_status == 1) {
+                       $mode_placeholder = "Rule 模式";
+                   } else {
+                       $mode_placeholder = "未运行";
+                   }
+                   ?>
+                   <input class="form-control text-center" name="mode" type="text" placeholder="<?php echo $mode_placeholder; ?>" disabled>
+               </td>
+           </tr>
+       </tbody>
+   </table>
+<script>
+    document.addEventListener("DOMContentLoaded", function() {
+        const savedConfig = localStorage.getItem("configSelection");
+        if (savedConfig) {
+            document.getElementById("config_file").value = savedConfig;
+        }
+    });
+    function saveConfigSelection() {
+        const selectedConfig = document.getElementById("config_file").value;
+        localStorage.setItem("configSelection", selectedConfig);
+    }
 </script>
-</body>
-</html>
-<tbody>
-    <tr>
-   <br>
-
-<table class="table table-borderless mb-2">
-    <tbody>
-        <tr>
-            <style>
-                .btn-group .btn {
-                    width: 100%;
-                }
-            </style>
-            <td>状态</td>
-            <td class="d-grid">
-                <div class="btn-group" role="group" aria-label="ctrl">
-                    <?php
-                    if ($neko_status == 1) {
-                        echo "<button type=\"button\" class=\"btn btn-success\">Mihomo 运行中</button>\n";
-                    } else {
-                        echo "<button type=\"button\" class=\"btn btn-outline-danger\">Mihomo 未运行</button>\n";
-                    }
-                    echo "<button type=\"button\" class=\"btn btn-deepskyblue\">$str_cfg</button>\n";
-                    if ($singbox_status == 1) {
-                        echo "<button type=\"button\" class=\"btn btn-success\">Sing-box 运行中</button>\n";
-                    } else {
-                        echo "<button type=\"button\" class=\"btn btn-outline-danger\">Sing-box 未运行</button>\n";
-                    }
-                    ?>
-                </div>
-            </td>
-        </tr>
-        <tr>
-            <td>控制</td>
-            <form action="index.php" method="post">
-                <td class="d-grid">
-                    <div class="btn-group col" role="group" aria-label="ctrl">
-                        <button type="submit" name="neko" value="start" class="btn btn<?php if ($neko_status == 1) echo "-outline" ?>-success <?php if ($neko_status == 1) echo "disabled" ?> d-grid">启用 Mihomo</button>
-                        <button type="submit" name="neko" value="disable" class="btn btn<?php if ($neko_status == 0) echo "-outline" ?>-danger <?php if ($neko_status == 0) echo "disabled" ?> d-grid">停用 Mihomo</button>
-                        <button type="submit" name="neko" value="restart" class="btn btn<?php if ($neko_status == 0) echo "-outline" ?>-warning <?php if ($neko_status == 0) echo "disabled" ?> d-grid">重启 Mihomo</button>
-                    </div>
-                </td>
-            </form>
-            <form action="index.php" method="post">
-                <td class="d-grid">
-                    <select name="config_file" id="config_file" class="form-select">
-                        <?php foreach ($availableConfigs as $config): ?>
-                            <option value="<?= htmlspecialchars($config) ?>" <?= isset($_POST['config_file']) && $_POST['config_file'] === $config ? 'selected' : '' ?>>
-                                <?= htmlspecialchars(basename($config)) ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                    <div class="btn-group col" role="group" aria-label="ctrl">
-                        <button type="submit" name="singbox" value="start" class="btn btn<?php echo ($singbox_status == 1) ? "-outline" : "" ?>-success <?php echo ($singbox_status == 1) ? "disabled" : "" ?> d-grid">启用 Sing-box</button>
-                        <button type="submit" name="singbox" value="disable" class="btn btn<?php echo ($singbox_status == 0) ? "-outline" : "" ?>-danger <?php echo ($singbox_status == 0) ? "disabled" : "" ?> d-grid">停用 Sing-box</button>
-                        <button type="submit" name="singbox" value="restart" class="btn btn<?php echo ($singbox_status == 0) ? "-outline" : "" ?>-warning <?php echo ($singbox_status == 0) ? "disabled" : "" ?> d-grid">重启 Sing-box</button>
-                    </div>
-                </td>
-            </form>
-        </tr>
-        <tr>
-            <td>运行模式</td>
-            <td class="d-grid">
-                <?php
-                $mode_placeholder = '';
-                if ($neko_status == 1) {
-                    $mode_placeholder = $neko_cfg['echanced'] . " | " . $neko_cfg['mode'];
-                } elseif ($singbox_status == 1) {
-                    $mode_placeholder = "Rule 模式";
-                } else {
-                    $mode_placeholder = "未运行";
-                }
-                ?>
-                <input class="form-control text-center" name="mode" type="text" placeholder="<?php echo $mode_placeholder; ?>" disabled>
-            </td>
-        </tr>
-    </tbody>
+<h2 class="text-center">系统状态</h2>
+<table class="table table-borderless rounded-4 mb-2">
+   <tbody>
+       <tr>
+           <td style="width:150px">系统信息</td>
+           <td id="systemInfo"></td>
+       </tr>
+       <tr>
+           <td style="width:150px">内存</td>
+           <td id="ramUsage"></td>
+       </tr>
+       <tr>
+           <td style="width:150px">平均负载</td>
+           <td id="cpuLoad"></td>
+       </tr>
+       <tr>
+           <td style="width:150px">运行时间</td>
+           <td id="uptime"></td>
+       </tr>
+       <tr>
+           <td style="width:150px">流量统计</td>
+           <td>⬇️ <span id="downtotal"></span> | ⬆️ <span id="uptotal"></span></td>
+       </tr>
+   </tbody>
 </table>
-
-    <style>
-        .icon-container { display: flex; justify-content: space-between; margin-top: 20px; }
-        .icon { text-align: center; width: 30%; }
-        .icon i { font-size: 48px; }
-    </style>
-    <link rel="stylesheet" href="./assets/bootstrap/all.min.css">
-    <div class="container">
-    <h2 class="text-center p-2" >系统状态</h2>
-    <table class="table table-borderless rounded-4 mb-2">
-        <tbody>
-                <td>系统信息</td>
-                <td class="col-7"><?php echo  $devices . ' - ' . $fullOSInfo; ?></td>
-            </tr>
-            <tr>
-                <td>内存</td>
-                <td class="col-7"><?php echo "$ramUsage/$ramTotal MB" ?></td>
-            </tr>
-            <tr>
-                <td>平均负载</td>
-                <td class="col-7"><?php echo "$cpuLoadAvg1Min $cpuLoadAvg5Min $cpuLoadAvg15Min" ?></td>
-            </tr>
-            <tr>
-                <td>运行时间</td>
-                <td class="col-7"><?php echo "{$days}天 {$hours}小时 {$minutes}分钟 {$seconds}秒" ?></td>
-            </tr>
-        </tbody>
-    </table>
-
-        <div class="icon-container">
-            <div class="icon">
-                <i class="fas fa-microchip"></i>
-                <p>CPU</p>
-                <p><?php echo isset($cpuLoadAvg1Min) ? $cpuLoadAvg1Min : 'N/A'; ?></p>
-            </div>
-            <div class="icon">
-                <i class="fas fa-memory"></i>
-                <p>内存</p>
-                <p><?php echo (isset($ramUsage) && isset($ramTotal)) ? $ramUsage . ' / ' . $ramTotal . ' MB' : 'N/A'; ?></p>
-            </div>
-            <div class="icon">
-                <i class="fas fa-exchange-alt"></i>
-                <p>交换空间</p>
-                <p>N/A</p>
-            </div>
-        </div>
+    <script>
+        function fetchSystemStatus() {
+            fetch('?ajax=1')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('systemInfo').innerText = data.systemInfo;
+                    document.getElementById('ramUsage').innerText = data.ramUsage;
+                    document.getElementById('cpuLoad').innerText = data.cpuLoad;
+                    document.getElementById('uptime').innerText = data.uptime;
+                    document.getElementById('cpuLoadAvg1Min').innerText = data.cpuLoadAvg1Min;
+                    document.getElementById('ramUsageOnly').innerText = data.ramUsageOnly + ' / ' + data.ramTotal + ' MB';
+                })
+                .catch(error => console.error('Error fetching data:', error));
+        }
+        setInterval(fetchSystemStatus, 1000);
+        fetchSystemStatus();
+    </script>
+ <h2 class="text-center">日志</h2>
+<div class="card log-card">
+    <div class="card-header">
+        <h4 class="card-title text-center mb-0">NeKoBox 日志</h4>
     </div>
-
-<div style="border: 1px solid black; padding: 10px; text-align: center;">
-    <table style="width: 100%;">
-        <tbody>
-            <tr>
-                <td style="width: 50%;">下载-总计</td>
-                <td style="width: 50%;">上传-总计</td>
-            </tr>
-            <tr>
-                <td><span id="downtotal">-</span></td>
-                <td><span id="uptotal">-</span></td>
-            </tr>
-        </tbody>
-    </table>
+    <div class="card-body">
+        <pre id="plugin_log" class="log-container form-control"></pre>
+    </div>
+    <div class="card-footer text-center">
+        <form action="index.php" method="post">
+            <button type="submit" name="clear_plugin_log" class="btn btn-danger">🗑️ 清空日志</button>
+        </form>
+    </div>
 </div>
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        .log-container {
-            height: 270px; 
-            overflow-y: auto;
-            overflow-x: hidden;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }
-        .log-card {
-            margin-bottom: 20px;
-        }
-    </style>
-</head>
-<body>
-    <h2 class="text-center my-4">日志</h2>
-    <div class="row">
-        <div class="col-12"> 
-            <div class="card log-card">
-                <div class="card-header">
-                    <h4 class="card-title text-center mb-0">NeKoBox 日志</h4>
-                </div>
-                <div class="card-body">
-                    <pre id="plugin_log" class="log-container form-control"></pre>
-                </div>
-                <div class="card-footer text-center">
-                    <form action="index.php" method="post">
-                        <button type="submit" name="clear_plugin_log" class="btn btn-danger">🗑️ 清空日志</button>
-                    </form>
-                </div>
-            </div>
-        </div>
+
+<div class="card log-card">
+    <div class="card-header">
+        <h4 class="card-title text-center mb-0">Mihomo 日志</h4>
     </div>
-    <div class="row">
-        <div class="col-12">
-            <div class="card log-card">
-                <div class="card-header">
-                    <h4 class="card-title text-center mb-0">Mihomo 日志</h4>
-                </div>
-                <div class="card-body">
-                    <pre id="bin_logs" class="log-container form-control"></pre>
-                </div>
-                <div class="card-footer text-center">
-                    <form action="index.php" method="post">
-                        <button type="submit" name="neko" value="clear" class="btn btn-danger">🗑️ 清空日志</button>
-                    </form>
-                </div>
-            </div>
-        </div>
+    <div class="card-body">
+        <pre id="bin_logs" class="log-container form-control"></pre>
     </div>
-<div class="row">
-    <div class="col-12">
-        <div class="card log-card">
-            <div class="card-header">
-                <h4 class="card-title text-center mb-0">Sing-box 日志</h4>
+    <div class="card-footer text-center">
+        <form action="index.php" method="post">
+            <button type="submit" name="neko" value="clear" class="btn btn-danger">🗑️ 清空日志</button>
+        </form>
+    </div>
+</div>
+
+<div class="card log-card">
+    <div class="card-header">
+        <h4 class="card-title text-center mb-0">Sing-box 日志</h4>
+    </div>
+    <div class="card-body">
+        <pre id="singbox_log" class="log-container form-control"></pre>
+    </div>
+    <div class="card-footer text-center">
+        <form action="index.php" method="post" class="d-inline-block">
+            <div class="form-check form-check-inline mb-2">
+                <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+                <label class="form-check-label" for="autoRefresh">自动刷新</label>
             </div>
-            <div class="card-body">
-                <pre id="singbox_log" class="log-container form-control"></pre>
-            </div>
-            <div class="card-footer text-center">
-                <form action="index.php" method="post" class="d-inline-block">
-                    <div class="form-check form-check-inline mb-2">
-                        <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
-                        <label class="form-check-label" for="autoRefresh">自动刷新</label>
-                    </div>
-                    <button type="submit" name="clear_singbox_log" class="btn btn-danger">🗑️ 清空日志</button>
-                    <button type="submit" name="update_log" value="update" class="btn btn-primary">🔄 更新时区</button>
-                </form>
-            </div>
-        </div>
+            <button type="submit" name="clear_singbox_log" class="btn btn-danger">🗑️ 清空日志</button>
+            <button type="submit" name="update_log" value="update" class="btn btn-primary">🔄 更新时区</button>
+        </form>
     </div>
 </div>
 
@@ -1062,14 +824,12 @@ if (isset($_POST['update_log'])) {
     }
 }
 ?>
-
 <script src="./assets/js/bootstrap.bundle.min.js"></script>
 <script>
     function scrollToBottom(elementId) {
         var logElement = document.getElementById(elementId);
         logElement.scrollTop = logElement.scrollHeight;
     }
-
     function fetchLogs() {
         if (!document.getElementById('autoRefresh').checked) {
             return;
@@ -1090,10 +850,8 @@ if (isset($_POST['update_log'])) {
         })
         .catch(err => console.error('Error fetching logs:', err));
     }
-
     fetchLogs();
     let intervalId = setInterval(fetchLogs, 5000);
-
     document.getElementById('autoRefresh').addEventListener('change', function() {
         if (this.checked) {
             intervalId = setInterval(fetchLogs, 5000);
@@ -1102,6 +860,28 @@ if (isset($_POST['update_log'])) {
         }
     });
 </script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const autoRefreshCheckbox = document.getElementById('autoRefresh');
+        const isChecked = localStorage.getItem('autoRefresh') === 'true';
+        autoRefreshCheckbox.checked = isChecked;
+
+        if (isChecked) {
+            intervalId = setInterval(fetchLogs, 5000);
+        }
+    });
+
+    document.getElementById('autoRefresh').addEventListener('change', function() {
+        localStorage.setItem('autoRefresh', this.checked);
+        if (this.checked) {
+            intervalId = setInterval(fetchLogs, 5000);
+        } else {
+            clearInterval(intervalId);
+        }
+    });
+</script>
+
 </body>
 </html>
     <footer class="text-center">
